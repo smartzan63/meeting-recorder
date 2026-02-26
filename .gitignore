@@ -1,0 +1,30 @@
+# Secrets — never commit
+.env
+
+# Runtime data — personal recordings and transcripts
+recordings/*
+!recordings/.gitkeep
+transcripts/*
+!transcripts/.gitkeep
+
+# Test recordings — may contain personal audio
+test_recordings/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp

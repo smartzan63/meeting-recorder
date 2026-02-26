@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+obsws-python
+python-dotenv
+python-multipart
+google-genai
+openai
+requests

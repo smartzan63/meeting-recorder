@@ -1,0 +1,1449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Meeting Recorder</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: #1a1a1a;
+      color: #ffffff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 60px 24px 40px;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 500;
+      color: #aaaaaa;
+      margin-bottom: 48px;
+      letter-spacing: 0.04em;
+    }
+
+    .controls {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+
+    #record-btn {
+      width: 180px;
+      height: 180px;
+      border-radius: 50%;
+      border: none;
+      cursor: pointer;
+      font-size: 1.1rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      transition: background-color 0.2s ease, transform 0.1s ease, box-shadow 0.2s ease;
+      background-color: #2ecc71;
+      color: #ffffff;
+      box-shadow: 0 0 0 6px rgba(46, 204, 113, 0.2);
+      outline: none;
+    }
+
+    #record-btn:hover:not(:disabled) {
+      filter: brightness(1.1);
+      transform: scale(1.03);
+    }
+
+    #record-btn:active:not(:disabled) {
+      transform: scale(0.97);
+    }
+
+    #record-btn.recording {
+      background-color: #e74c3c;
+      box-shadow: 0 0 0 6px rgba(231, 76, 60, 0.2);
+    }
+
+    #record-btn.recording:hover:not(:disabled) {
+      filter: brightness(1.1);
+    }
+
+    #record-btn:disabled {
+      cursor: not-allowed;
+      opacity: 0.5;
+      box-shadow: none;
+    }
+
+    #timer {
+      font-size: 2.4rem;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 0.05em;
+      color: #cccccc;
+      font-family: "SF Mono", "Menlo", "Consolas", monospace;
+      min-height: 2.8rem;
+    }
+
+    #timer.hidden {
+      visibility: hidden;
+    }
+
+    #status-line {
+      font-size: 0.95rem;
+      color: #888888;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    #status-line.error {
+      color: #e74c3c;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255, 255, 255, 0.2);
+      border-top-color: #ffffff;
+      border-radius: 50%;
+      animation: spin 0.75s linear infinite;
+      flex-shrink: 0;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .model-selector {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .model-selector label.selector-label {
+      font-size: 0.78rem;
+      color: #666666;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    #model-select {
+      background-color: #2a2a2a;
+      border: 1px solid #3a3a3a;
+      color: #cccccc;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 0.88rem;
+      cursor: pointer;
+      outline: none;
+      transition: border-color 0.15s ease, opacity 0.15s ease;
+    }
+
+    #model-select:hover:not(:disabled) {
+      border-color: #555555;
+    }
+
+    #model-select:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .translate-toggle {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.85rem;
+      color: #888888;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .translate-toggle.visible {
+      display: flex;
+    }
+
+    .translate-toggle input[type="checkbox"] {
+      accent-color: #2ecc71;
+      width: 15px;
+      height: 15px;
+      cursor: pointer;
+    }
+
+    .translate-toggle:has(input:disabled) {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    /* ── Save section (shown after OBS recording stops) ── */
+
+    .save-section {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .save-section.visible {
+      display: flex;
+    }
+
+    .section-hint {
+      font-size: 0.88rem;
+      color: #888888;
+    }
+
+    .save-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    #name-input {
+      background-color: #2a2a2a;
+      border: 1px solid #3a3a3a;
+      color: #cccccc;
+      padding: 7px 12px;
+      border-radius: 6px;
+      font-size: 0.88rem;
+      outline: none;
+      width: 240px;
+      transition: border-color 0.15s ease;
+      font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    }
+
+    #name-input:focus {
+      border-color: #555555;
+    }
+
+    /* ── Process-now section (shown after save) ── */
+
+    .process-prompt {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .process-prompt.visible {
+      display: flex;
+    }
+
+    .process-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    /* Shared button style for save/process/cancel actions */
+    .action-btn {
+      background: #2a2a2a;
+      border: 1px solid #3a3a3a;
+      color: #cccccc;
+      padding: 7px 18px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: background-color 0.15s ease, color 0.15s ease;
+      white-space: nowrap;
+    }
+
+    .action-btn:hover:not(:disabled) {
+      background: #333333;
+      color: #ffffff;
+    }
+
+    .action-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .action-btn.primary {
+      background: #2ecc71;
+      border-color: #2ecc71;
+      color: #ffffff;
+    }
+
+    .action-btn.primary:hover:not(:disabled) {
+      filter: brightness(1.1);
+    }
+
+    /* ── File upload section ── */
+
+    .file-section {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      margin-top: 8px;
+    }
+
+    .divider {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      max-width: 320px;
+      color: #444444;
+      font-size: 0.78rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .divider::before,
+    .divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: #2e2e2e;
+    }
+
+    .file-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    #file-input {
+      display: none;
+    }
+
+    #file-label {
+      background: #2a2a2a;
+      border: 1px solid #3a3a3a;
+      color: #aaaaaa;
+      padding: 7px 14px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: border-color 0.15s ease, color 0.15s ease;
+      white-space: nowrap;
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    #file-label:hover {
+      border-color: #555555;
+      color: #cccccc;
+    }
+
+    #file-label.disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+
+    #process-btn {
+      background: #2a2a2a;
+      border: 1px solid #3a3a3a;
+      color: #cccccc;
+      padding: 7px 18px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: background-color 0.15s ease, color 0.15s ease;
+      white-space: nowrap;
+    }
+
+    #process-btn:hover:not(:disabled) {
+      background: #333333;
+      color: #ffffff;
+    }
+
+    #process-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    /* ── Transcript section ── */
+
+    .transcript-section {
+      width: 100%;
+      max-width: 760px;
+      display: none;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .transcript-section.visible {
+      display: flex;
+    }
+
+    .transcript-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .transcript-header span {
+      font-size: 0.9rem;
+      color: #888888;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .transcript-header-actions {
+      display: flex;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    /* ── History panel ── */
+
+    .history-section {
+      width: 100%;
+      max-width: 760px;
+      margin-bottom: 8px;
+    }
+
+    .history-section summary {
+      font-size: 0.78rem;
+      color: #555555;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      cursor: pointer;
+      user-select: none;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .history-section summary::-webkit-details-marker { display: none; }
+
+    .history-section summary::before {
+      content: '▸';
+      font-size: 0.7rem;
+      transition: transform 0.15s ease;
+    }
+
+    .history-section[open] summary::before {
+      transform: rotate(90deg);
+    }
+
+    .history-list {
+      margin-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .history-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 7px 10px;
+      background: #1e1e1e;
+      border: 1px solid #2a2a2a;
+      border-radius: 6px;
+      gap: 12px;
+    }
+
+    .history-item-name {
+      font-size: 0.85rem;
+      color: #cccccc;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .history-item-meta {
+      font-size: 0.75rem;
+      color: #555555;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .history-load-btn {
+      background: none;
+      border: 1px solid #3a3a3a;
+      color: #666666;
+      border-radius: 4px;
+      padding: 3px 10px;
+      font-size: 0.78rem;
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+      transition: color 0.15s ease, border-color 0.15s ease;
+    }
+
+    .history-load-btn:hover {
+      color: #cccccc;
+      border-color: #666666;
+    }
+
+    /* ── Summary card ── */
+
+    .summary-card {
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+      background: #111111;
+      border: 1px solid #2e2e2e;
+      border-radius: 8px;
+      padding: 14px 16px;
+    }
+
+    .summary-card.visible {
+      display: flex;
+    }
+
+    .summary-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .summary-card-label {
+      font-size: 0.78rem;
+      color: #666666;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .summary-dismiss {
+      background: none;
+      border: none;
+      color: #555555;
+      cursor: pointer;
+      font-size: 1rem;
+      line-height: 1;
+      padding: 0 2px;
+      transition: color 0.15s ease;
+    }
+
+    .summary-dismiss:hover {
+      color: #aaaaaa;
+    }
+
+    .summary-body {
+      font-size: 0.88rem;
+      color: #cccccc;
+      line-height: 1.6;
+      word-break: break-word;
+    }
+
+    /* Rendered markdown styles */
+    .summary-body h1, .summary-body h2, .summary-body h3 {
+      color: #dddddd;
+      font-weight: 600;
+      margin: 10px 0 4px;
+      font-size: 0.88rem;
+      letter-spacing: 0.01em;
+    }
+    .summary-body p { margin: 4px 0; }
+    .summary-body ul, .summary-body ol {
+      padding-left: 18px;
+      margin: 4px 0;
+    }
+    .summary-body li { margin: 2px 0; }
+    .summary-body strong { color: #eeeeee; font-weight: 600; }
+    .summary-body em { color: #aaaaaa; }
+    .summary-body code {
+      background: #1e1e1e;
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-family: "SF Mono", "Menlo", "Consolas", monospace;
+      font-size: 0.82rem;
+    }
+
+    /* Raw mode */
+    .summary-body.raw {
+      white-space: pre-wrap;
+      font-family: "SF Mono", "Menlo", "Consolas", monospace;
+      font-size: 0.82rem;
+      color: #aaaaaa;
+    }
+
+    .summary-body.loading {
+      color: #666666;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .summary-raw-btn {
+      background: none;
+      border: 1px solid #3a3a3a;
+      color: #555555;
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-size: 0.75rem;
+      cursor: pointer;
+      transition: color 0.15s ease, border-color 0.15s ease;
+    }
+
+    .summary-raw-btn:hover {
+      color: #aaaaaa;
+      border-color: #555555;
+    }
+
+    #copy-btn, #summarize-btn {
+      background: #2a2a2a;
+      border: 1px solid #3a3a3a;
+      color: #cccccc;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      transition: background-color 0.15s ease, color 0.15s ease;
+    }
+
+    #copy-btn:hover:not(:disabled), #summarize-btn:hover:not(:disabled) {
+      background: #333333;
+      color: #ffffff;
+    }
+
+    #copy-btn:disabled, #summarize-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    #copy-btn.copied {
+      background: #2ecc71;
+      color: #ffffff;
+      border-color: #2ecc71;
+    }
+
+    /* ── Speaker name editor ── */
+
+    .speaker-editor {
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .speaker-editor.visible {
+      display: flex;
+    }
+
+    .speaker-editor-label {
+      font-size: 0.78rem;
+      color: #666666;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .speaker-rows {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 16px;
+    }
+
+    .speaker-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .speaker-tag {
+      font-size: 0.78rem;
+      color: #666666;
+      font-family: "SF Mono", "Menlo", "Consolas", monospace;
+      white-space: nowrap;
+    }
+
+    .speaker-name-input {
+      background: #2a2a2a;
+      border: 1px solid #3a3a3a;
+      color: #cccccc;
+      padding: 5px 10px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      width: 140px;
+      outline: none;
+      transition: border-color 0.15s ease;
+    }
+
+    .speaker-name-input:focus {
+      border-color: #555555;
+    }
+
+    #transcript-area {
+      width: 100%;
+      min-height: 220px;
+      max-height: 480px;
+      background-color: #111111;
+      border: 1px solid #2e2e2e;
+      border-radius: 8px;
+      color: #e0e0e0;
+      font-family: "SF Mono", "Menlo", "Consolas", monospace;
+      font-size: 0.9rem;
+      line-height: 1.6;
+      padding: 16px;
+      resize: vertical;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Meeting Recorder</h1>
+
+  <div class="controls">
+    <button
+      id="record-btn"
+      aria-label="Start recording"
+    >Start<br>Recording</button>
+
+    <div class="model-selector">
+      <label class="selector-label" for="model-select">Model</label>
+      <select id="model-select" aria-label="Transcription model"></select>
+      <label class="translate-toggle" id="translate-toggle">
+        <input type="checkbox" id="translate-check" />
+        Translate to English
+      </label>
+    </div>
+
+    <div id="timer" class="hidden" aria-live="off">00:00</div>
+
+    <div id="status-line" role="status" aria-live="polite"></div>
+  </div>
+
+  <!-- Save section: name the recording after OBS stops -->
+  <div class="save-section" id="save-section">
+    <p class="section-hint">Name this recording</p>
+    <div class="save-row">
+      <input type="text" id="name-input" autocomplete="off" spellcheck="false" />
+      <button class="action-btn primary" id="save-name-btn">Save</button>
+    </div>
+  </div>
+
+  <!-- Process-now section: shown after save -->
+  <div class="process-prompt" id="process-prompt">
+    <p class="section-hint" id="process-hint"></p>
+    <div class="process-row">
+      <button class="action-btn primary" id="process-now-btn">Process now</button>
+      <button class="action-btn" id="not-now-btn">Not now</button>
+    </div>
+  </div>
+
+  <div class="file-section">
+    <div class="divider">or process a file</div>
+    <div class="file-row">
+      <input type="file" id="file-input" accept="audio/*,video/*,.m4a,.mkv,.mp4,.wav,.mp3,.aac" />
+      <label id="file-label" for="file-input">Choose file…</label>
+      <button id="process-btn" disabled>Process</button>
+    </div>
+  </div>
+
+  <details class="history-section" id="history-section">
+    <summary>Recent transcripts</summary>
+    <div class="history-list" id="history-list"></div>
+  </details>
+
+  <div class="transcript-section" id="transcript-section">
+    <div class="transcript-header">
+      <span>Transcript <span id="transcript-model" style="font-size:0.75rem;color:#555;text-transform:none;letter-spacing:0;margin-left:8px;"></span></span>
+      <div class="transcript-header-actions">
+        <button id="summarize-btn" aria-label="Summarize transcript">Summarize</button>
+        <button id="copy-btn" aria-label="Copy transcript to clipboard">Copy</button>
+      </div>
+    </div>
+    <div class="speaker-editor" id="speaker-editor">
+      <span class="speaker-editor-label">Speakers</span>
+      <div class="speaker-rows" id="speaker-rows"></div>
+    </div>
+    <div class="summary-card" id="summary-card">
+      <div class="summary-card-header">
+        <span class="summary-card-label">Summary</span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="summary-raw-btn" id="summary-raw-btn">Raw</button>
+          <button class="summary-dismiss" id="summary-dismiss" aria-label="Dismiss summary">✕</button>
+        </div>
+      </div>
+      <div class="summary-body" id="summary-body"></div>
+    </div>
+    <div id="transcript-area" role="region" aria-label="Transcript text"></div>
+  </div>
+
+  <script>
+    // ---------------------------------------------------------------------------
+    // State
+    // ---------------------------------------------------------------------------
+    const STATE = {
+      IDLE:          'idle',
+      RECORDING:     'recording',
+      STOPPED:       'stopped',
+      TRANSCRIBING:  'transcribing',
+      DONE:          'done',
+      ERROR:         'error',
+    };
+
+    let appState = STATE.IDLE;
+    let timerInterval = null;
+    let timerSeconds = 0;
+    let wsInstance = null;
+    let wsReconnectTimer = null;
+    let savedWavPath = null;
+    let originalTranscript = '';   // raw transcript before any name substitutions
+    let summaryMarkdown = '';      // raw markdown from /summarize
+    let summaryRawMode = false;    // toggle: rendered vs raw
+
+    // ---------------------------------------------------------------------------
+    // DOM refs
+    // ---------------------------------------------------------------------------
+    const recordBtn      = document.getElementById('record-btn');
+    const timerEl        = document.getElementById('timer');
+    const statusLine     = document.getElementById('status-line');
+    const transcriptSec  = document.getElementById('transcript-section');
+    const transcriptArea = document.getElementById('transcript-area');
+    const copyBtn        = document.getElementById('copy-btn');
+    const modelSelect      = document.getElementById('model-select');
+    const translateToggle  = document.getElementById('translate-toggle');
+    const translateCheck   = document.getElementById('translate-check');
+    const saveSec        = document.getElementById('save-section');
+    const nameInput      = document.getElementById('name-input');
+    const saveNameBtn    = document.getElementById('save-name-btn');
+    const processPrompt  = document.getElementById('process-prompt');
+    const processHint    = document.getElementById('process-hint');
+    const processNowBtn  = document.getElementById('process-now-btn');
+    const notNowBtn      = document.getElementById('not-now-btn');
+
+    // Show translate toggle only for multilingual model
+    modelSelect.addEventListener('change', () => {
+      translateToggle.classList.toggle('visible', modelSelect.value === 'multilingual');
+    });
+
+    // ---------------------------------------------------------------------------
+    // UI helpers
+    // ---------------------------------------------------------------------------
+    function padTwo(n) {
+      return String(n).padStart(2, '0');
+    }
+
+    function formatTime(totalSeconds) {
+      const m = Math.floor(totalSeconds / 60);
+      const s = totalSeconds % 60;
+      return `${padTwo(m)}:${padTwo(s)}`;
+    }
+
+    function setStatus(text, isError = false) {
+      statusLine.innerHTML = '';
+      statusLine.classList.toggle('error', isError);
+      if (text) {
+        statusLine.appendChild(document.createTextNode(text));
+      }
+    }
+
+    function setStatusWithSpinner(text) {
+      statusLine.classList.remove('error');
+      statusLine.innerHTML = '';
+      const spinner = document.createElement('span');
+      spinner.className = 'spinner';
+      spinner.setAttribute('aria-hidden', 'true');
+      statusLine.appendChild(spinner);
+      statusLine.appendChild(document.createTextNode(text));
+    }
+
+    function startTimer() {
+      clearInterval(timerInterval);   // always clear before starting — prevents double-tick
+      timerSeconds = 0;
+      timerEl.textContent = formatTime(0);
+      timerEl.classList.remove('hidden');
+      timerEl.setAttribute('aria-label', 'Recording timer: 0 minutes 0 seconds');
+      timerInterval = setInterval(() => {
+        timerSeconds++;
+        timerEl.textContent = formatTime(timerSeconds);
+      }, 1000);
+    }
+
+    function stopTimer() {
+      clearInterval(timerInterval);
+      timerInterval = null;
+    }
+
+    function hideTimer() {
+      stopTimer();
+      timerEl.classList.add('hidden');
+    }
+
+    function hideSaveSections() {
+      saveSec.classList.remove('visible');
+      processPrompt.classList.remove('visible');
+    }
+
+    function applyState(state, message) {
+      appState = state;
+
+      const busy = state === STATE.PRELOADING
+                || state === STATE.RECORDING
+                || state === STATE.STOPPED
+                || state === STATE.TRANSCRIBING;
+      modelSelect.disabled = busy;
+      translateCheck.disabled = busy;
+
+      switch (state) {
+        case STATE.IDLE:
+          recordBtn.innerHTML = 'Start<br>Recording';
+          recordBtn.className = '';
+          recordBtn.disabled = false;
+          recordBtn.setAttribute('aria-label', 'Start recording');
+          hideTimer();
+          setStatus('');
+          hideSaveSections();
+          break;
+
+        case STATE.PRELOADING:
+          recordBtn.innerHTML = 'Start<br>Recording';
+          recordBtn.className = '';
+          recordBtn.disabled = true;
+          recordBtn.setAttribute('aria-label', 'Start recording (unavailable while loading models)');
+          hideTimer();
+          setStatusWithSpinner(message ? ` ${message}` : ' Loading models...');
+          hideSaveSections();
+          break;
+
+        case STATE.RECORDING:
+          recordBtn.innerHTML = 'Stop<br>Recording';
+          recordBtn.className = 'recording';
+          recordBtn.disabled = false;
+          recordBtn.setAttribute('aria-label', 'Stop recording');
+          startTimer();
+          setStatus('Recording...');
+          hideSaveSections();
+          break;
+
+        case STATE.STOPPED:
+          recordBtn.innerHTML = 'Start<br>Recording';
+          recordBtn.className = '';
+          recordBtn.disabled = true;
+          recordBtn.setAttribute('aria-label', 'Start recording (unavailable while naming)');
+          hideTimer();
+          setStatus('');
+          break;
+
+        case STATE.TRANSCRIBING:
+          recordBtn.innerHTML = 'Start<br>Recording';
+          recordBtn.className = '';
+          recordBtn.disabled = true;
+          recordBtn.setAttribute('aria-label', 'Start recording (unavailable while transcribing)');
+          hideTimer();
+          setStatusWithSpinner(message ? ` ${message}` : ' Transcribing...');
+          hideSaveSections();
+          break;
+
+        case STATE.DONE:
+          recordBtn.innerHTML = 'Start<br>Recording';
+          recordBtn.className = '';
+          recordBtn.disabled = false;
+          recordBtn.setAttribute('aria-label', 'Start recording');
+          hideTimer();
+          setStatus(message || 'Transcript ready.');
+          hideSaveSections();
+          break;
+
+        case STATE.ERROR:
+          recordBtn.innerHTML = 'Start<br>Recording';
+          recordBtn.className = '';
+          recordBtn.disabled = false;
+          recordBtn.setAttribute('aria-label', 'Start recording');
+          hideTimer();
+          setStatus(message || 'An error occurred.', true);
+          hideSaveSections();
+          break;
+      }
+    }
+
+    function showTranscript(text) {
+      originalTranscript = text;
+      transcriptArea.textContent = text;
+      transcriptSec.classList.add('visible');
+      transcriptArea.scrollTop = transcriptArea.scrollHeight;
+      buildSpeakerEditor(text);
+      // Reset summary whenever a new transcript arrives
+      summaryMarkdown = '';
+      summaryRawMode = false;
+      summaryCard.classList.remove('visible');
+      summaryBody.textContent = '';
+    }
+
+    // ---------------------------------------------------------------------------
+    // Speaker name editor
+    // ---------------------------------------------------------------------------
+    const speakerEditor = document.getElementById('speaker-editor');
+    const speakerRows   = document.getElementById('speaker-rows');
+
+    function buildSpeakerEditor(text) {
+      // Extract unique SPEAKER_XX labels in order of appearance
+      const found = [];
+      const seen = new Set();
+      for (const m of text.matchAll(/SPEAKER_\d+/g)) {
+        if (!seen.has(m[0])) { seen.add(m[0]); found.push(m[0]); }
+      }
+
+      speakerRows.innerHTML = '';
+
+      if (found.length === 0) {
+        speakerEditor.classList.remove('visible');
+        return;
+      }
+
+      for (const speaker of found) {
+        const row = document.createElement('div');
+        row.className = 'speaker-row';
+
+        const tag = document.createElement('span');
+        tag.className = 'speaker-tag';
+        tag.textContent = speaker;
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'speaker-name-input';
+        input.placeholder = 'Name…';
+        input.dataset.speaker = speaker;
+        input.autocomplete = 'off';
+        input.spellcheck = false;
+        input.addEventListener('input', applyAllSpeakerNames);
+
+        row.appendChild(tag);
+        row.appendChild(input);
+        speakerRows.appendChild(row);
+      }
+
+      speakerEditor.classList.add('visible');
+    }
+
+    function applyAllSpeakerNames() {
+      let text = originalTranscript;
+      for (const input of speakerRows.querySelectorAll('.speaker-name-input')) {
+        const name = input.value.trim();
+        if (name) {
+          text = text.replaceAll(input.dataset.speaker, name);
+        }
+      }
+      transcriptArea.textContent = text;
+    }
+
+    function showSaveForm(defaultName) {
+      nameInput.value = defaultName || '';
+      saveSec.classList.add('visible');
+      processPrompt.classList.remove('visible');
+      nameInput.focus();
+      nameInput.select();
+    }
+
+    function showProcessPrompt(wavPath) {
+      const shortName = wavPath.split('/').pop();
+      processHint.textContent = `Saved to recordings/${shortName}. Process now?`;
+      processPrompt.classList.add('visible');
+      saveSec.classList.remove('visible');
+    }
+
+    // ---------------------------------------------------------------------------
+    // Record button
+    // ---------------------------------------------------------------------------
+    recordBtn.addEventListener('click', async () => {
+      if (appState === STATE.IDLE || appState === STATE.DONE || appState === STATE.ERROR) {
+        await startRecording();
+      } else if (appState === STATE.RECORDING) {
+        await stopRecording();
+      }
+    });
+
+    async function startRecording() {
+      recordBtn.disabled = true;
+      try {
+        const res = await fetch('/recording/start', { method: 'POST' });
+        if (!res.ok) {
+          throw new Error(`Server returned ${res.status}`);
+        }
+        // WS may have already applied RECORDING state; guard against double startTimer
+        if (appState !== STATE.RECORDING) {
+          applyState(STATE.RECORDING);
+        }
+      } catch (err) {
+        applyState(STATE.ERROR, `Failed to start: ${err.message}`);
+      }
+    }
+
+    async function stopRecording() {
+      recordBtn.disabled = true;
+      hideTimer();   // immediately hide — don't leave a frozen timer visible
+      try {
+        const res = await fetch('/recording/stop', { method: 'POST' });
+        if (!res.ok) {
+          throw new Error(`Server returned ${res.status}`);
+        }
+        const data = await res.json();
+        applyState(STATE.STOPPED);
+        showSaveForm(data.default_name || '');
+      } catch (err) {
+        applyState(STATE.ERROR, `Failed to stop: ${err.message}`);
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Save section handlers
+    // ---------------------------------------------------------------------------
+    saveNameBtn.addEventListener('click', async () => {
+      const name = nameInput.value.trim();
+      if (!name) {
+        nameInput.focus();
+        return;
+      }
+      saveNameBtn.disabled = true;
+      try {
+        const res = await fetch('/recording/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+          throw new Error(err.error || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        savedWavPath = data.wav_path;
+        showProcessPrompt(savedWavPath);
+      } catch (err) {
+        applyState(STATE.ERROR, `Save failed: ${err.message}`);
+      } finally {
+        saveNameBtn.disabled = false;
+      }
+    });
+
+    // Allow Enter key in name input to trigger save
+    nameInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') saveNameBtn.click();
+    });
+
+    processNowBtn.addEventListener('click', async () => {
+      if (!savedWavPath) return;
+      const task = translateCheck.checked ? 'translate' : 'transcribe';
+      applyState(STATE.TRANSCRIBING);
+      try {
+        const res = await fetch('/test/process', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file: savedWavPath, model: modelSelect.value, task }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+          throw new Error(err.error || `HTTP ${res.status}`);
+        }
+        savedWavPath = null;
+      } catch (err) {
+        applyState(STATE.ERROR, `Process failed: ${err.message}`);
+      }
+    });
+
+    notNowBtn.addEventListener('click', () => {
+      savedWavPath = null;
+      applyState(STATE.IDLE);
+    });
+
+    // ---------------------------------------------------------------------------
+    // File upload
+    // ---------------------------------------------------------------------------
+    const fileInput   = document.getElementById('file-input');
+    const fileLabel   = document.getElementById('file-label');
+    const processBtn  = document.getElementById('process-btn');
+
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files.length > 0) {
+        fileLabel.textContent = fileInput.files[0].name;
+        const busy = appState === STATE.PRELOADING || appState === STATE.RECORDING
+                  || appState === STATE.STOPPED    || appState === STATE.TRANSCRIBING;
+        processBtn.disabled = busy;
+      } else {
+        fileLabel.textContent = 'Choose file…';
+        processBtn.disabled = true;
+      }
+    });
+
+    processBtn.addEventListener('click', async () => {
+      const file = fileInput.files[0];
+      if (!file || processBtn.disabled) return;
+
+      processBtn.disabled = true;
+      fileLabel.classList.add('disabled');
+
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('model', modelSelect.value);
+      formData.append('task', translateCheck.checked ? 'translate' : 'transcribe');
+
+      try {
+        const res = await fetch('/upload', { method: 'POST', body: formData });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+          throw new Error(err.error || `HTTP ${res.status}`);
+        }
+        applyState(STATE.TRANSCRIBING);
+      } catch (err) {
+        applyState(STATE.ERROR, `Upload failed: ${err.message}`);
+        processBtn.disabled = false;
+        fileLabel.classList.remove('disabled');
+      }
+    });
+
+    // Gate file controls based on app busy state
+    const _origApplyState = applyState;
+    applyState = function(state, message) {
+      _origApplyState(state, message);
+      const busy = state === STATE.PRELOADING || state === STATE.RECORDING
+                || state === STATE.STOPPED    || state === STATE.TRANSCRIBING;
+      fileLabel.classList.toggle('disabled', busy);
+      fileInput.disabled = busy;
+      processBtn.disabled = busy || fileInput.files.length === 0;
+    };
+
+    // ---------------------------------------------------------------------------
+    // Copy button
+    // ---------------------------------------------------------------------------
+    copyBtn.addEventListener('click', async () => {
+      const text = transcriptArea.textContent;
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        // Fallback for browsers that block clipboard API
+        const ta = Object.assign(document.createElement('textarea'), {
+          value: text,
+          style: 'position:fixed;opacity:0',
+        });
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      copyBtn.textContent = 'Copied!';
+      copyBtn.classList.add('copied');
+      setTimeout(() => {
+        copyBtn.textContent = 'Copy';
+        copyBtn.classList.remove('copied');
+      }, 1500);
+    });
+
+    // ---------------------------------------------------------------------------
+    // Summarize
+    // ---------------------------------------------------------------------------
+    const summarizeBtn   = document.getElementById('summarize-btn');
+    const summaryCard    = document.getElementById('summary-card');
+    const summaryBody    = document.getElementById('summary-body');
+    const summaryDismiss = document.getElementById('summary-dismiss');
+    const summaryRawBtn  = document.getElementById('summary-raw-btn');
+
+    function renderSummary() {
+      if (!summaryMarkdown) return;
+      if (summaryRawMode) {
+        summaryBody.className = 'summary-body raw';
+        summaryBody.textContent = summaryMarkdown;
+        summaryRawBtn.textContent = 'Formatted';
+      } else {
+        summaryBody.className = 'summary-body';
+        summaryBody.innerHTML = marked.parse(summaryMarkdown);
+        summaryRawBtn.textContent = 'Raw';
+      }
+    }
+
+    summarizeBtn.addEventListener('click', async () => {
+      // Use the displayed transcript — names assigned via speaker editor are already applied
+      const text = transcriptArea.textContent;
+      if (!text) return;
+
+      summaryCard.classList.add('visible');
+      summaryBody.className = 'summary-body loading';
+      summaryBody.innerHTML = '<span class="spinner" aria-hidden="true"></span> Summarizing…';
+      summarizeBtn.disabled = true;
+
+      try {
+        const res = await fetch('/summarize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        summaryMarkdown = data.summary;
+        summaryRawMode = false;
+        renderSummary();
+      } catch (err) {
+        summaryBody.className = 'summary-body';
+        summaryBody.textContent = `Error: ${err.message}`;
+      } finally {
+        summarizeBtn.disabled = false;
+      }
+    });
+
+    summaryRawBtn.addEventListener('click', () => {
+      summaryRawMode = !summaryRawMode;
+      renderSummary();
+    });
+
+    summaryDismiss.addEventListener('click', () => {
+      summaryMarkdown = '';
+      summaryRawMode = false;
+      summaryCard.classList.remove('visible');
+      summaryBody.textContent = '';
+    });
+
+    // ---------------------------------------------------------------------------
+    // WebSocket
+    // ---------------------------------------------------------------------------
+    function connectWS() {
+      if (wsInstance && (wsInstance.readyState === WebSocket.CONNECTING || wsInstance.readyState === WebSocket.OPEN)) {
+        return;
+      }
+
+      const ws = new WebSocket(`ws://${location.host}/ws`);
+      wsInstance = ws;
+
+      ws.addEventListener('open', () => {
+        clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = null;
+      });
+
+      ws.addEventListener('message', (event) => {
+        let msg;
+        try { msg = JSON.parse(event.data); } catch { return; }
+
+        if (msg.type === 'status') {
+          const state   = msg.state;
+          const message = msg.message || '';
+
+          if (state === STATE.PRELOADING) {
+            applyState(STATE.PRELOADING, message);
+          } else if (state === STATE.IDLE) {
+            if (appState === STATE.IDLE || appState === STATE.PRELOADING) {
+              applyState(STATE.IDLE);
+            }
+          } else if (state === STATE.RECORDING) {
+            if (appState !== STATE.RECORDING) {
+              applyState(STATE.RECORDING, message);
+            }
+          } else if (state === 'stopped') {
+            // Edge case: WS reconnect during naming — fall back to idle
+            if (appState !== STATE.STOPPED) {
+              applyState(STATE.IDLE);
+            }
+          } else if (state === STATE.TRANSCRIBING) {
+            applyState(STATE.TRANSCRIBING, message);
+          } else if (state === STATE.DONE) {
+            applyState(STATE.DONE, message);
+          } else if (state === STATE.ERROR) {
+            applyState(STATE.ERROR, message);
+          }
+        } else if (msg.type === 'transcript') {
+          const text = msg.text || '';
+          showTranscript(text);
+          const modelEl = document.getElementById('transcript-model');
+          if (modelEl) modelEl.textContent = msg.model ? `· ${msg.model}` : '';
+          applyState(STATE.DONE, 'Transcript ready.');
+          loadHistory();
+        }
+      });
+
+      ws.addEventListener('close', () => {
+        wsInstance = null;
+        scheduleReconnect();
+      });
+
+      ws.addEventListener('error', () => { ws.close(); });
+    }
+
+    function scheduleReconnect() {
+      if (wsReconnectTimer !== null) return;
+      wsReconnectTimer = setTimeout(() => {
+        wsReconnectTimer = null;
+        connectWS();
+      }, 3000);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Boot
+    // ---------------------------------------------------------------------------
+    applyState(STATE.IDLE);
+    connectWS();
+
+    // ---------------------------------------------------------------------------
+    // History
+    // ---------------------------------------------------------------------------
+    const historySection = document.getElementById('history-section');
+    const historyList    = document.getElementById('history-list');
+
+    function loadHistory() {
+      fetch('/transcripts')
+        .then(r => r.json())
+        .then(items => {
+          historyList.innerHTML = '';
+          if (items.length === 0) {
+            historySection.style.display = 'none';
+            return;
+          }
+          historySection.style.display = '';
+          items.forEach(item => {
+            const row = document.createElement('div');
+            row.className = 'history-item';
+
+            const name = document.createElement('span');
+            name.className = 'history-item-name';
+            name.textContent = item.source;
+            name.title = item.source;
+
+            const meta = document.createElement('span');
+            meta.className = 'history-item-meta';
+            const date = item.created_at ? new Date(item.created_at).toLocaleDateString() : '';
+            meta.textContent = [date, item.model].filter(Boolean).join(' · ');
+
+            const btn = document.createElement('button');
+            btn.className = 'history-load-btn';
+            btn.textContent = 'Load';
+            btn.addEventListener('click', () => loadHistoryItem(item.id, item.source));
+
+            row.appendChild(name);
+            row.appendChild(meta);
+            row.appendChild(btn);
+            historyList.appendChild(row);
+          });
+        })
+        .catch(() => { historySection.style.display = 'none'; });
+    }
+
+    function loadHistoryItem(id, source) {
+      fetch(`/transcripts/${id}`)
+        .then(r => r.json())
+        .then(data => {
+          showTranscript(data.text);
+          const modelEl = document.getElementById('transcript-model');
+          if (modelEl) modelEl.textContent = data.meta.model ? `· ${data.meta.model}` : '';
+          applyState(STATE.DONE, `Loaded: ${source}`);
+        })
+        .catch(err => applyState(STATE.ERROR, `Failed to load: ${err.message}`));
+    }
+
+    loadHistory();
+
+    fetch('/models')
+      .then(r => r.json())
+      .then(models => {
+        modelSelect.innerHTML = '';
+        models.forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m.key;
+          opt.textContent = m.label;
+          if (m.default) opt.selected = true;
+          modelSelect.appendChild(opt);
+        });
+        const selectorDiv = document.querySelector('.model-selector');
+        if (selectorDiv) selectorDiv.style.display = '';
+      })
+      .catch(err => console.warn('Failed to load models list:', err));
+  </script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+services:
+  meeting-recorder:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      # Reach OBS running on the host machine.
+      # host.docker.internal works on Docker Desktop (Mac + Windows).
+      # On Linux add: extra_hosts: ["host.docker.internal:host-gateway"]
+      OBS_HOST: "host.docker.internal"
+    volumes:
+      - ./recordings:/app/recordings
+      - ./transcripts:/app/transcripts
+    restart: unless-stopped
