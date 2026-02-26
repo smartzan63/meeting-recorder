@@ -162,10 +162,5 @@ python test_pipeline.py path/to/recording.wav
 
 ## Linux Docker note
 
-`host.docker.internal` is not available by default on Linux. Add this to `docker-compose.yml` under the service:
-
-```yaml
-extra_hosts:
-  - "host.docker.internal:host-gateway"
-```
+`host.docker.internal:host-gateway` is already in `docker-compose.yml` so Linux is supported out of the box — no extra steps needed.
 

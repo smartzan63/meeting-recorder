@@ -6,11 +6,13 @@ services:
     env_file:
       - .env
     environment:
-      # Reach OBS running on the host machine.
-      # host.docker.internal works on Docker Desktop (Mac + Windows).
-      # On Linux add: extra_hosts: ["host.docker.internal:host-gateway"]
       OBS_HOST: "host.docker.internal"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./recordings:/app/recordings
       - ./transcripts:/app/transcripts
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     restart: unless-stopped
