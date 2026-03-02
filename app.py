@@ -8,6 +8,7 @@ WebSocket clients receive JSON status messages as the pipeline progresses.
 import asyncio
 import json
 import logging
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -16,6 +17,7 @@ from typing import Set
 
 from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 import config
 
@@ -47,6 +49,7 @@ logger = logging.getLogger(__name__)
 _state: str = "idle"
 _ws_clients: Set[WebSocket] = set()
 _stopped_path: str | None = None  # OBS output path held between stop and user naming
+_recording_started_at: float | None = None
 
 
 # ── WebSocket helpers ─────────────────────────────────────────────────────────
@@ -64,7 +67,10 @@ async def _broadcast(message: dict) -> None:
 async def _send_status(state: str, message: str = "") -> None:
     global _state
     _state = state
-    await _broadcast({"type": "status", "state": state, "message": message})
+    payload: dict = {"type": "status", "state": state, "message": message}
+    if state == "recording" and _recording_started_at is not None:
+        payload["started_at"] = _recording_started_at
+    await _broadcast(payload)
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -86,11 +92,6 @@ app = FastAPI(lifespan=lifespan)
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@app.get("/")
-async def index():
-    return FileResponse("static/index.html")
-
-
 @app.get("/models")
 async def models():
     if config.PROVIDER == "azure":
@@ -107,6 +108,7 @@ async def models():
 
 @app.post("/recording/start")
 async def recording_start():
+    global _recording_started_at
     try:
         obs.start_recording()
     except RuntimeError as e:
@@ -116,13 +118,14 @@ async def recording_start():
         logger.exception("Failed to start recording")
         return JSONResponse(status_code=503, content={"error": f"OBS error: {e}"})
 
+    _recording_started_at = time.time()
     await _send_status("recording", "Recording started")
     return {"state": "recording"}
 
 
 @app.post("/recording/stop")
 async def recording_stop():
-    global _stopped_path
+    global _stopped_path, _recording_started_at
     try:
         audio_path = obs.stop_recording()
     except RuntimeError as e:
@@ -131,6 +134,7 @@ async def recording_stop():
         logger.exception("Failed to stop recording")
         return JSONResponse(status_code=503, content={"error": f"OBS error: {e}"})
 
+    _recording_started_at = None
     _stopped_path = audio_path
     default_name = Path(audio_path).stem.replace(" ", "_")
     await _send_status("stopped", "")
@@ -259,6 +263,16 @@ async def list_transcripts():
     return results
 
 
+@app.delete("/transcripts/{transcript_id}")
+async def delete_transcript(transcript_id: str):
+    import shutil
+    d = Path(config.TRANSCRIPTS_DIR) / transcript_id
+    if not d.exists():
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    shutil.rmtree(d)
+    return {"deleted": transcript_id}
+
+
 @app.get("/transcripts/{transcript_id}")
 async def get_transcript(transcript_id: str):
     d = Path(config.TRANSCRIPTS_DIR) / transcript_id
@@ -278,7 +292,10 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     _ws_clients.add(ws)
     # Send current state immediately so the client can sync
-    await ws.send_json({"type": "status", "state": _state, "message": ""})
+    init_payload: dict = {"type": "status", "state": _state, "message": ""}
+    if _state == "recording" and _recording_started_at is not None:
+        init_payload["started_at"] = _recording_started_at
+    await ws.send_json(init_payload)
     try:
         while True:
             # Keep the connection alive; we don't expect messages from the client
@@ -356,6 +373,23 @@ async def _run_pipeline(audio_path: str, recording_id: str, model_key: str = con
         status_queue.put_nowait(None)
         await drain_task
         await _send_status("error", f"Pipeline error: {e}")
+
+
+# ── Static file serving ───────────────────────────────────────────────────────
+
+# Serve the React SPA — must be mounted last so API routes take priority
+import os as _os
+if _os.path.isdir("frontend/dist"):
+    app.mount("/assets", StaticFiles(directory="frontend/dist/assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        return FileResponse("frontend/dist/index.html")
+else:
+    # Fallback to old static HTML during development (before first build)
+    @app.get("/{full_path:path}")
+    async def serve_static(full_path: str):
+        return FileResponse("static/index.html")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

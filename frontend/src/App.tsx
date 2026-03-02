@@ -1,0 +1,446 @@
+import { useReducer, useEffect, useCallback, useRef } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { Badge } from '@/components/ui/badge'
+import { useWebSocket } from '@/hooks/useWebSocket'
+import { RecordPanel } from '@/components/RecordPanel'
+import { TranscriptPanel } from '@/components/TranscriptPanel'
+
+// --- Types ---
+
+type AppStatus = 'idle' | 'recording' | 'stopped' | 'transcribing' | 'done' | 'error'
+
+type AppState = {
+  status: AppStatus
+  statusMessage: string
+  timerSeconds: number
+  transcript: string
+  originalTranscript: string
+  transcriptModel: string
+  savedWavPath: string | null
+  defaultRecordingName: string
+  showSaveDialog: boolean
+  showProcessPrompt: boolean
+  summaryMarkdown: string
+  isSummarizing: boolean
+  selectedModel: string
+  translateEnabled: boolean
+  history: Array<{ id: string; source: string; model: string; created_at: string }>
+}
+
+type Model = {
+  key: string
+  label: string
+  default: boolean
+}
+
+// --- Actions ---
+
+type Action =
+  | { type: 'SET_STATUS'; status: AppStatus; message?: string }
+  | { type: 'SET_STATUS_MESSAGE'; message: string }
+  | { type: 'TIMER_TICK' }
+  | { type: 'TIMER_RESET' }
+  | { type: 'TIMER_INIT'; seconds: number }
+  | { type: 'SET_TRANSCRIPT'; text: string; model: string }
+  | { type: 'UPDATE_TRANSCRIPT'; text: string }
+  | { type: 'OPEN_SAVE_DIALOG'; defaultName: string }
+  | { type: 'SET_SAVED_WAV'; path: string }
+  | { type: 'HIDE_PROCESS_PROMPT' }
+  | { type: 'HIDE_SAVE_DIALOG' }
+  | { type: 'SET_SUMMARY'; markdown: string }
+  | { type: 'SET_SUMMARIZING'; value: boolean }
+  | { type: 'DISMISS_SUMMARY' }
+  | { type: 'SET_MODEL'; key: string }
+  | { type: 'SET_TRANSLATE'; value: boolean }
+  | { type: 'SET_HISTORY'; items: AppState['history'] }
+
+// --- Reducer ---
+
+const initialState: AppState = {
+  status: 'idle',
+  statusMessage: '',
+  timerSeconds: 0,
+  transcript: '',
+  originalTranscript: '',
+  transcriptModel: '',
+  savedWavPath: null,
+  defaultRecordingName: '',
+  showSaveDialog: false,
+  showProcessPrompt: false,
+  summaryMarkdown: '',
+  isSummarizing: false,
+  selectedModel: '',
+  translateEnabled: false,
+  history: [],
+}
+
+function reducer(state: AppState, action: Action): AppState {
+  switch (action.type) {
+    case 'SET_STATUS': {
+      const base = {
+        ...state,
+        status: action.status,
+        statusMessage: action.message ?? state.statusMessage,
+      }
+      if (action.status === 'idle') {
+        return {
+          ...base,
+          timerSeconds: 0,
+          showSaveDialog: false,
+          showProcessPrompt: false,
+          statusMessage: '',
+        }
+      }
+      if (action.status === 'recording') {
+        return { ...base, timerSeconds: 0, statusMessage: 'Recording…' }
+      }
+      if (action.status === 'stopped') {
+        return { ...base, timerSeconds: 0, statusMessage: '' }
+      }
+      if (action.status === 'done') {
+        return { ...base, statusMessage: action.message ?? 'Transcript ready.' }
+      }
+      if (action.status === 'error') {
+        return { ...base, statusMessage: action.message ?? 'An error occurred.' }
+      }
+      return base
+    }
+    case 'SET_STATUS_MESSAGE':
+      return { ...state, statusMessage: action.message }
+    case 'TIMER_TICK':
+      return { ...state, timerSeconds: state.timerSeconds + 1 }
+    case 'TIMER_RESET':
+      return { ...state, timerSeconds: 0 }
+    case 'TIMER_INIT':
+      return { ...state, timerSeconds: action.seconds }
+    case 'SET_TRANSCRIPT':
+      return {
+        ...state,
+        transcript: action.text,
+        originalTranscript: action.text,
+        transcriptModel: action.model,
+        status: 'done',
+        statusMessage: 'Transcript ready.',
+        showSaveDialog: false,
+        showProcessPrompt: false,
+      }
+    case 'UPDATE_TRANSCRIPT':
+      return { ...state, transcript: action.text }
+    case 'OPEN_SAVE_DIALOG':
+      return {
+        ...state,
+        defaultRecordingName: action.defaultName,
+        showSaveDialog: true,
+        showProcessPrompt: false,
+      }
+    case 'SET_SAVED_WAV':
+      return {
+        ...state,
+        savedWavPath: action.path,
+        showSaveDialog: false,
+        showProcessPrompt: true,
+      }
+    case 'HIDE_PROCESS_PROMPT':
+      return { ...state, showProcessPrompt: false }
+    case 'HIDE_SAVE_DIALOG':
+      return { ...state, showSaveDialog: false }
+    case 'SET_SUMMARY':
+      return { ...state, summaryMarkdown: action.markdown, isSummarizing: false }
+    case 'SET_SUMMARIZING':
+      return { ...state, isSummarizing: action.value }
+    case 'DISMISS_SUMMARY':
+      return { ...state, summaryMarkdown: '' }
+    case 'SET_MODEL':
+      return { ...state, selectedModel: action.key }
+    case 'SET_TRANSLATE':
+      return { ...state, translateEnabled: action.value }
+    case 'SET_HISTORY':
+      return { ...state, history: action.items }
+    default:
+      return state
+  }
+}
+
+// --- API helpers ---
+
+async function apiPost<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`${path} failed: ${res.status} ${text}`)
+  }
+  return res.json() as Promise<T>
+}
+
+async function fetchHistory() {
+  const res = await fetch('/transcripts')
+  if (!res.ok) return []
+  return res.json() as Promise<Array<{ id: string; source: string; model: string; created_at: string }>>
+}
+
+async function fetchTranscript(id: string): Promise<{ text: string; meta: { source: string; model: string; created_at: string } }> {
+  const res = await fetch(`/transcripts/${id}`)
+  if (!res.ok) throw new Error('Failed to load transcript')
+  return res.json()
+}
+
+// --- App ---
+
+export default function App() {
+  const [state, dispatch] = useReducer(reducer, initialState)
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const stoppingRef = useRef(false)
+  const { lastMessage } = useWebSocket()
+
+  // Fetch models
+  const { data: models = [] } = useQuery<Model[]>({
+    queryKey: ['models'],
+    queryFn: async () => {
+      const res = await fetch('/models')
+      if (!res.ok) return []
+      return res.json()
+    },
+  })
+
+  // Set default model once models load
+  useEffect(() => {
+    if (models.length > 0 && !state.selectedModel) {
+      const def = models.find((m) => m.default) ?? models[0]
+      dispatch({ type: 'SET_MODEL', key: def.key })
+    }
+  }, [models, state.selectedModel])
+
+  // Timer
+  useEffect(() => {
+    if (state.status === 'recording') {
+      timerRef.current = setInterval(() => {
+        dispatch({ type: 'TIMER_TICK' })
+      }, 1000)
+    } else {
+      if (timerRef.current !== null) {
+        clearInterval(timerRef.current)
+        timerRef.current = null
+      }
+    }
+    return () => {
+      if (timerRef.current !== null) {
+        clearInterval(timerRef.current)
+        timerRef.current = null
+      }
+    }
+  }, [state.status])
+
+  // WebSocket message handler
+  useEffect(() => {
+    if (!lastMessage) return
+
+    if (lastMessage.type === 'status') {
+      const serverState = lastMessage.state ?? ''
+      const msg = lastMessage.message ?? ''
+
+      if (serverState === 'recording' && (state.status === 'idle' || state.status === 'done')) {
+        dispatch({ type: 'SET_STATUS', status: 'recording' })
+        if (lastMessage.started_at) {
+          const elapsed = Math.floor(Date.now() / 1000 - lastMessage.started_at)
+          dispatch({ type: 'TIMER_INIT', seconds: Math.max(0, elapsed) })
+        }
+      } else if (serverState === 'stopped' && state.status !== 'stopped' && state.status !== 'idle') {
+        // Edge case: reconnected while user was naming — go back to idle
+        dispatch({ type: 'SET_STATUS', status: 'idle' })
+      } else if (serverState === 'transcribing') {
+        dispatch({ type: 'SET_STATUS', status: 'transcribing', message: msg || 'Transcribing…' })
+      } else if (serverState === 'error') {
+        dispatch({ type: 'SET_STATUS', status: 'error', message: msg || 'An error occurred.' })
+      } else if (serverState === 'done') {
+        dispatch({ type: 'SET_STATUS', status: 'done', message: 'Transcript ready.' })
+      } else if (serverState === 'idle' && state.status === 'transcribing') {
+        dispatch({ type: 'SET_STATUS', status: 'idle' })
+      }
+    } else if (lastMessage.type === 'transcript') {
+      dispatch({
+        type: 'SET_TRANSCRIPT',
+        text: lastMessage.text ?? '',
+        model: lastMessage.model ?? '',
+      })
+      // Refresh history
+      void fetchHistory().then((items) => dispatch({ type: 'SET_HISTORY', items }))
+    }
+  }, [lastMessage, state.status])
+
+  // Load history on mount
+  useEffect(() => {
+    void fetchHistory().then((items) => dispatch({ type: 'SET_HISTORY', items }))
+  }, [])
+
+  // --- Handlers ---
+
+  const handleStartRecording = useCallback(async () => {
+    try {
+      await apiPost('/recording/start')
+      dispatch({ type: 'SET_STATUS', status: 'recording' })
+    } catch (err) {
+      dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
+    }
+  }, [])
+
+  const handleStopRecording = useCallback(async () => {
+    if (stoppingRef.current) return
+    stoppingRef.current = true
+    try {
+      const res = await apiPost<{ state: string; default_name: string }>('/recording/stop')
+      dispatch({ type: 'OPEN_SAVE_DIALOG', defaultName: res.default_name })
+    } catch (err) {
+      dispatch({ type: 'SET_STATUS', status: 'error', message: `Failed to stop: ${(err as Error).message}` })
+    } finally {
+      stoppingRef.current = false
+    }
+  }, [])
+
+  const handleSaveRecording = useCallback(async (name: string) => {
+    try {
+      const res = await apiPost<{ wav_path: string }>('/recording/save', { name })
+      dispatch({ type: 'SET_SAVED_WAV', path: res.wav_path })
+    } catch (err) {
+      dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
+    }
+  }, [])
+
+  const handleProcessNow = useCallback(async () => {
+    if (!state.savedWavPath) return
+    try {
+      dispatch({ type: 'HIDE_PROCESS_PROMPT' })
+      dispatch({ type: 'SET_STATUS', status: 'transcribing', message: 'Transcribing…' })
+      await apiPost('/test/process', {
+        file: state.savedWavPath,
+        model: state.selectedModel,
+        task: state.translateEnabled ? 'translate' : 'transcribe',
+      })
+    } catch (err) {
+      dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
+    }
+  }, [state.savedWavPath, state.selectedModel, state.translateEnabled])
+
+  const handleSkipProcess = useCallback(() => {
+    dispatch({ type: 'SET_STATUS', status: 'idle' })
+  }, [])
+
+  const handleFileUpload = useCallback(async (file: File) => {
+    try {
+      dispatch({ type: 'SET_STATUS', status: 'transcribing', message: 'Uploading…' })
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('model', state.selectedModel)
+      formData.append('task', state.translateEnabled ? 'translate' : 'transcribe')
+      const res = await fetch('/upload', { method: 'POST', body: formData })
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(`Upload failed: ${res.status} ${text}`)
+      }
+      dispatch({ type: 'SET_STATUS_MESSAGE', message: 'Transcribing…' })
+    } catch (err) {
+      dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
+    }
+  }, [state.selectedModel, state.translateEnabled])
+
+  const handleSummarize = useCallback(async () => {
+    if (!state.transcript) return
+    try {
+      dispatch({ type: 'SET_SUMMARIZING', value: true })
+      const res = await apiPost<{ summary: string }>('/summarize', { text: state.transcript })
+      dispatch({ type: 'SET_SUMMARY', markdown: res.summary })
+    } catch (err) {
+      dispatch({ type: 'SET_SUMMARIZING', value: false })
+      dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
+    }
+  }, [state.transcript])
+
+  const handleSummaryDismiss = useCallback(() => {
+    dispatch({ type: 'DISMISS_SUMMARY' })
+  }, [])
+
+  const handleDeleteHistory = useCallback(async (id: string) => {
+    const res = await fetch(`/transcripts/${id}`, { method: 'DELETE' })
+    if (!res.ok) throw new Error(`Delete failed: ${res.status}`)
+    const items = await fetchHistory()
+    dispatch({ type: 'SET_HISTORY', items })
+  }, [])
+
+  const handleLoadHistory = useCallback(async (id: string, _source: string) => {
+    try {
+      const data = await fetchTranscript(id)
+      dispatch({ type: 'SET_TRANSCRIPT', text: data.text, model: data.meta.model })
+    } catch (err) {
+      dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
+    }
+  }, [])
+
+  const handleTranscriptChange = useCallback((text: string) => {
+    dispatch({ type: 'UPDATE_TRANSCRIPT', text })
+  }, [])
+
+  // Provider label
+  const providerLabel = models.length === 1 && models[0]?.key === 'azure' ? 'Azure' : 'Gemini'
+
+  const isLoading = state.status === 'transcribing'
+
+  return (
+    <div className="dark min-h-screen bg-zinc-950 text-zinc-100 flex flex-col">
+      {/* Header */}
+      <header className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
+        <h1 className="text-lg font-medium tracking-wide text-muted-foreground">
+          Meeting Recorder
+        </h1>
+        <Badge variant="outline">{providerLabel}</Badge>
+      </header>
+
+      {/* Two-column layout */}
+      <div className="flex flex-col md:flex-row flex-1 min-h-0">
+        {/* Record panel */}
+        <aside className="w-full md:w-[380px] md:shrink-0 border-b md:border-b-0 md:border-r border-zinc-800 overflow-y-auto">
+          <RecordPanel
+            status={state.status}
+            statusMessage={state.statusMessage}
+            timerSeconds={state.timerSeconds}
+            models={models}
+            selectedModel={state.selectedModel}
+            onModelChange={(key) => dispatch({ type: 'SET_MODEL', key })}
+            translateEnabled={state.translateEnabled}
+            onTranslateChange={(value) => dispatch({ type: 'SET_TRANSLATE', value })}
+            savedWavPath={state.savedWavPath}
+            defaultRecordingName={state.defaultRecordingName}
+            showSaveDialog={state.showSaveDialog}
+            showProcessPrompt={state.showProcessPrompt}
+            onStartRecording={handleStartRecording}
+            onStopRecording={handleStopRecording}
+            onSaveRecording={handleSaveRecording}
+            onProcessNow={handleProcessNow}
+            onSkipProcess={handleSkipProcess}
+            onFileUpload={handleFileUpload}
+          />
+        </aside>
+
+        {/* Transcript panel */}
+        <main className="flex-1 overflow-y-auto p-6">
+          <TranscriptPanel
+            transcript={state.transcript}
+            originalTranscript={state.originalTranscript}
+            transcriptModel={state.transcriptModel}
+            onTranscriptChange={handleTranscriptChange}
+            summaryMarkdown={state.summaryMarkdown}
+            onSummarize={handleSummarize}
+            onSummaryDismiss={handleSummaryDismiss}
+            isSummarizing={state.isSummarizing}
+            history={state.history}
+            onLoadHistory={handleLoadHistory}
+            onDeleteHistory={handleDeleteHistory}
+            isLoading={isLoading}
+          />
+        </main>
+      </div>
+    </div>
+  )
+}
