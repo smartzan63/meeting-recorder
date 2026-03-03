@@ -3,14 +3,14 @@
 Describes all user-facing features and the expected behavior for each scenario.
 Intended as the source of truth for manual testing and future Playwright test coverage.
 
-App runs at `http://localhost:8080`. Backend: FastAPI + WebSocket. Provider set via `PROVIDER` env var (`gemini` or `azure`).
+App runs at `http://localhost:8080`. Backend: FastAPI + WebSocket. Provider set via `PROVIDER` env var (`gemini`, `azure`, or `mock`).
 
 ---
 
 ## 1. App Load
 
 **S1.1 — Initial state**
-- Page loads, header shows "Meeting Recorder" and a provider badge ("Gemini" or "Azure")
+- Page loads, header shows "Meeting Recorder" and a provider badge ("Gemini", "Azure", or "Mock")
 - Left panel shows the record button (green, "Start Recording")
 - Right panel shows an empty state: icon + "Start a recording or upload a file"
 - Model selector is visible if more than one model is available (Gemini provider only)
@@ -56,7 +56,7 @@ Prerequisites: OBS is running, WebSocket enabled on port 4455, recording output 
 **S2.5 — Skip processing**
 - Click "Skip" on the process prompt
 - App returns to idle state, no transcript is shown
-- The saved `.wav` file remains in `recordings/`
+- The saved `.wav` file remains in `data/audio/`
 
 **S2.6 — Stop recording fails (OBS not recording)**
 - If OBS returns an error on stop (e.g. was not actually recording)
@@ -94,13 +94,18 @@ Prerequisites: OBS is running, WebSocket enabled on port 4455, recording output 
 - Speaker editor appears below the header if `SPEAKER_XX` labels are present
 
 **S4.2 — Speaker name editor**
-- One input row per unique `SPEAKER_XX` found in the transcript (in order of appearance)
+- One input row per unique `SPEAKER_XX` detected at transcription time (stored in meta, not rescanned from text)
 - Each speaker has a distinct color badge
 - Typing a name into an input immediately replaces all occurrences of that speaker label in the displayed transcript
 - Original transcript is preserved — clearing the name input restores the `SPEAKER_XX` label
 - Copy button copies the transcript with speaker names applied (not the raw `SPEAKER_XX` text)
 
-**S4.3 — Copy transcript**
+**S4.3 — Speaker names persist across reload**
+- Speaker names are saved to the backend on every keystroke via `PUT /transcripts/{id}` with `{"speakers": {...}}`
+- Names are stored in the transcript meta JSON (`data/transcripts/{name}.json`)
+- Reloading the page and loading the same recording from history restores the saved names
+
+**S4.4 — Copy transcript**
 - Click "Copy"
 - Button briefly shows "Copied" then reverts
 - Clipboard contains the current displayed transcript text (with any speaker name substitutions)
@@ -110,10 +115,11 @@ Prerequisites: OBS is running, WebSocket enabled on port 4455, recording output 
 ## 5. Summarization
 
 **S5.1 — Generate summary**
-- With a transcript loaded, click "Summarize"
-- Button disables during the request
+- With a transcript loaded, click "Enrich & Summarise"
+- Button shows "Enriching…" with a spinner and disables during the request
 - Summary card appears below the transcript when the response arrives
 - Summary is rendered as formatted markdown
+- Summary is auto-saved to `data/summaries/{name}.txt` if the recording has a name
 
 **S5.2 — Toggle raw / formatted**
 - Summary card has a "Raw" button
@@ -125,8 +131,9 @@ Prerequisites: OBS is running, WebSocket enabled on port 4455, recording output 
 - Card disappears, transcript remains visible
 
 **S5.4 — Re-summarize**
-- After dismissing, the "Summarize" button is available again
-- Clicking it generates a new summary
+- After dismissing, the "Enrich & Summarise" button is available again
+- When a summary already exists, the button reads "Re-enrich & Summarise"
+- Clicking it generates a new summary and overwrites the saved file
 
 ---
 
@@ -140,17 +147,21 @@ Prerequisites: OBS is running, WebSocket enabled on port 4455, recording output 
 - Click anywhere on a history tile
 - Transcript from that session loads in the right panel
 - Status message shows "Loaded: <source name>"
-- Speaker editor rebuilds for the loaded transcript
+- Speaker editor rebuilds with the speakers stored at transcription time
+- Previously saved speaker names are restored from meta
+- If a summary was saved for that recording, the summary card also loads automatically
 
 **S6.3 — Delete a recording**
 - Hover over a history tile — trash icon appears on the right
 - Click the trash icon (does not load the transcript — click is isolated)
 - Confirmation dialog appears: "Remove recording?" with the recording name
 - Clicking "Cancel" closes the dialog, recording remains
-- Clicking "Remove" deletes the transcript folder from disk and refreshes the history list
-- If the deleted item was the last one, the History section disappears
+- Clicking "Remove" deletes all associated files: `data/transcripts/{name}.txt`, `data/transcripts/{name}.json`, `data/summaries/{name}.txt` (if exists), `data/audio/{name}.wav` (if exists)
+- History list refreshes; if the deleted item was the last one, the History section disappears
 
-> **Note (2026-03-02):** Delete functionality was implemented but has not yet been validated end-to-end through automated tests. Manual smoke test should confirm the transcript folder is actually removed from `transcripts/` on disk.
+**S6.4 — Summary indicator on history tiles**
+- History tiles show a small "Summary" badge when `has_summary: true` is returned by the backend
+- Badge indicates a saved summary is available and will be loaded when the tile is clicked
 
 ---
 
@@ -201,7 +212,74 @@ Prerequisites: OBS is running, WebSocket enabled on port 4455, recording output 
 **S10.1 — Badge reflects active provider**
 - Header badge shows "Gemini" when `PROVIDER=gemini`
 - Header badge shows "Azure" when `PROVIDER=azure`
+- Header badge shows "Mock" when `PROVIDER=mock`
 - Badge is informational only — provider cannot be changed from the UI
+
+---
+
+## 11. AI Speaker Enrichment
+
+**S11.1 — Enrich button replaces Summarize**
+- With a transcript loaded, the button reads "Enrich & Summarise" (not "Summarize")
+- While the operation is in progress the button shows "Enriching…" with a spinner and is disabled
+
+**S11.2 — Names identified**
+- If the transcript contains speaker names in conversation context (e.g. someone is addressed by name, introduces themselves, or signs off), clicking "Enrich & Summarise" auto-populates the speaker name inputs with the identified names
+- The displayed transcript is immediately updated to substitute the identified names in place of SPEAKER_XX labels
+
+**S11.3 — Graceful fallback**
+- If enrichment returns no names (Gemini provider, mock provider, or names not found in transcript), summarization still completes normally
+- Speaker name inputs remain empty; no error is shown to the user
+- The `/enrich` endpoint always returns HTTP 200 — never 500
+
+**S11.4 — Summary uses identified names**
+- Summary is generated after enrichment completes
+- If speaker names were populated and the transcript was updated with substitutions, the summarized text reflects those real names (the substituted transcript is passed to `/summarize`)
+
+**S11.5 — Manual override**
+- User can still manually type speaker names at any time
+- Enriched names are only applied to inputs that are currently empty — names already typed by the user are not overwritten
+
+---
+
+## 12. Transcript Export
+
+**S12.1 — Download**
+- With a transcript loaded, click "Download .txt"
+- Browser downloads a file named `transcript.txt`
+- File contents match the current transcript with speaker name substitutions applied (not raw `SPEAKER_XX` text)
+- No backend call is made — download is entirely client-side
+
+**S12.2 — Confluence export**
+- Click "Confluence" with a transcript loaded
+- App calls `POST /export` with `destination=confluence`
+- Button is only shown when `CONFLUENCE_URL`, `CONFLUENCE_TOKEN`, etc. are configured
+- Backend creates a real Confluence page via REST API and returns the page URL
+- URL is displayed below the export buttons as a link: `Exported: <url>`
+- Export content includes the summary (if available); full transcript is included only when `EXPORT_INCLUDE_TRANSCRIPT=true`
+
+**S12.3 — Notion export**
+- Click "Notion" with a transcript loaded
+- App calls `POST /export` with `destination=notion`
+- Button is only shown when `NOTION_TOKEN` and `NOTION_DATABASE_ID` are configured
+- Backend validates credentials are present; page creation not yet fully implemented (returns placeholder URL)
+- URL is displayed below the export buttons as a link: `Exported: <url>`
+
+**S12.4 — Export disabled during processing**
+- All three export buttons (Download .txt, Confluence, Notion) are disabled when `isExporting` or `isLoading` (transcription in progress) is true
+- Confluence and Notion buttons show a spinner while `isExporting` is true
+
+**S12.5 — Export error**
+- If `/export` returns an error (e.g. `CONFLUENCE_URL` not configured in the environment), the error message is shown in the status area
+- Export buttons return to their normal enabled state
+
+**S12.6 — Export uses current transcript**
+- Download and export always use the transcript with speaker name substitutions applied
+- Raw `SPEAKER_XX` labels are not present in the exported content when names have been assigned
+
+**S12.7 — Export includes summary**
+- When a summary is visible, the backend receives it via the `summary` field in the `/export` request body
+- The mock implementation accepts it silently; real implementations should include it in the created page
 
 ---
 
@@ -211,3 +289,5 @@ Prerequisites: OBS is running, WebSocket enabled on port 4455, recording output 
 - No authentication — app is intended for local/trusted-network use
 - OBS must be running before clicking Start Recording; if not connected, a 503 error is shown
 - File size: Gemini free tier has a 20 requests/day limit; Azure Speech has no practical file size limit
+- Notion export is not yet fully implemented — validates credentials but returns a placeholder URL
+- Runtime data stored under `data/audio/`, `data/transcripts/`, `data/summaries/` — not committed to git

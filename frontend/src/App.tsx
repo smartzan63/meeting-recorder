@@ -9,6 +9,12 @@ import { TranscriptPanel } from '@/components/TranscriptPanel'
 
 type AppStatus = 'idle' | 'recording' | 'stopped' | 'transcribing' | 'done' | 'error'
 
+type Integrations = {
+  confluence: boolean
+  notion: boolean
+  test_file_path?: string | null
+}
+
 type AppState = {
   status: AppStatus
   statusMessage: string
@@ -24,7 +30,13 @@ type AppState = {
   isSummarizing: boolean
   selectedModel: string
   translateEnabled: boolean
-  history: Array<{ id: string; source: string; model: string; created_at: string }>
+  history: Array<{ id: string; source: string; model: string; created_at: string; has_summary?: boolean }>
+  enrichedSpeakers: Record<string, string>
+  speakersList: string[]
+  isExporting: boolean
+  lastExportUrl: string | null
+  currentRecordingName: string | null
+  integrations: Integrations
 }
 
 type Model = {
@@ -53,6 +65,12 @@ type Action =
   | { type: 'SET_MODEL'; key: string }
   | { type: 'SET_TRANSLATE'; value: boolean }
   | { type: 'SET_HISTORY'; items: AppState['history'] }
+  | { type: 'SET_ENRICHED_SPEAKERS'; speakers: Record<string, string> }
+  | { type: 'SET_SPEAKERS_LIST'; list: string[] }
+  | { type: 'SET_EXPORTING'; value: boolean }
+  | { type: 'SET_EXPORT_RESULT'; url: string | null }
+  | { type: 'SET_RECORDING_NAME'; name: string | null }
+  | { type: 'SET_INTEGRATIONS'; integrations: Integrations }
 
 // --- Reducer ---
 
@@ -72,6 +90,12 @@ const initialState: AppState = {
   selectedModel: '',
   translateEnabled: false,
   history: [],
+  enrichedSpeakers: {},
+  speakersList: [],
+  isExporting: false,
+  lastExportUrl: null,
+  currentRecordingName: null,
+  integrations: { confluence: false, notion: false },
 }
 
 function reducer(state: AppState, action: Action): AppState {
@@ -123,6 +147,11 @@ function reducer(state: AppState, action: Action): AppState {
         statusMessage: 'Transcript ready.',
         showSaveDialog: false,
         showProcessPrompt: false,
+        lastExportUrl: null,
+        currentRecordingName: null,
+        summaryMarkdown: '',
+        enrichedSpeakers: {},
+        speakersList: [],
       }
     case 'UPDATE_TRANSCRIPT':
       return { ...state, transcript: action.text }
@@ -156,6 +185,18 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, translateEnabled: action.value }
     case 'SET_HISTORY':
       return { ...state, history: action.items }
+    case 'SET_ENRICHED_SPEAKERS':
+      return { ...state, enrichedSpeakers: action.speakers }
+    case 'SET_SPEAKERS_LIST':
+      return { ...state, speakersList: action.list }
+    case 'SET_EXPORTING':
+      return { ...state, isExporting: action.value }
+    case 'SET_EXPORT_RESULT':
+      return { ...state, lastExportUrl: action.url }
+    case 'SET_RECORDING_NAME':
+      return { ...state, currentRecordingName: action.name }
+    case 'SET_INTEGRATIONS':
+      return { ...state, integrations: action.integrations }
     default:
       return state
   }
@@ -179,10 +220,10 @@ async function apiPost<T>(path: string, body?: unknown): Promise<T> {
 async function fetchHistory() {
   const res = await fetch('/transcripts')
   if (!res.ok) return []
-  return res.json() as Promise<Array<{ id: string; source: string; model: string; created_at: string }>>
+  return res.json() as Promise<Array<{ id: string; source: string; model: string; created_at: string; has_summary?: boolean }>>
 }
 
-async function fetchTranscript(id: string): Promise<{ text: string; meta: { source: string; model: string; created_at: string } }> {
+async function fetchTranscript(id: string): Promise<{ text: string; meta: { source: string; model: string; created_at: string }; summary?: string; speakers?: Record<string, string>; speakers_list?: string[] }> {
   const res = await fetch(`/transcripts/${id}`)
   if (!res.ok) throw new Error('Failed to load transcript')
   return res.json()
@@ -266,14 +307,23 @@ export default function App() {
         text: lastMessage.text ?? '',
         model: lastMessage.model ?? '',
       })
+      if (lastMessage.id) {
+        dispatch({ type: 'SET_RECORDING_NAME', name: lastMessage.id })
+      }
+      if (Array.isArray(lastMessage.speakers_list)) {
+        dispatch({ type: 'SET_SPEAKERS_LIST', list: lastMessage.speakers_list })
+      }
       // Refresh history
       void fetchHistory().then((items) => dispatch({ type: 'SET_HISTORY', items }))
     }
   }, [lastMessage, state.status])
 
-  // Load history on mount
+  // Load history and integrations on mount
   useEffect(() => {
     void fetchHistory().then((items) => dispatch({ type: 'SET_HISTORY', items }))
+    void fetch('/integrations').then((r) => r.ok ? r.json() : null).then((data) => {
+      if (data) dispatch({ type: 'SET_INTEGRATIONS', integrations: data })
+    })
   }, [])
 
   // --- Handlers ---
@@ -302,8 +352,9 @@ export default function App() {
 
   const handleSaveRecording = useCallback(async (name: string) => {
     try {
-      const res = await apiPost<{ wav_path: string }>('/recording/save', { name })
+      const res = await apiPost<{ wav_path: string; name: string }>('/recording/save', { name })
       dispatch({ type: 'SET_SAVED_WAV', path: res.wav_path })
+      dispatch({ type: 'SET_RECORDING_NAME', name: res.name })
     } catch (err) {
       dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
     }
@@ -346,17 +397,53 @@ export default function App() {
     }
   }, [state.selectedModel, state.translateEnabled])
 
-  const handleSummarize = useCallback(async () => {
+  const handleEnrichAndSummarize = useCallback(async () => {
     if (!state.transcript) return
+    dispatch({ type: 'SET_SUMMARIZING', value: true })
     try {
-      dispatch({ type: 'SET_SUMMARIZING', value: true })
-      const res = await apiPost<{ summary: string }>('/summarize', { text: state.transcript })
+      let textForSummary = state.originalTranscript || state.transcript
+
+      // Step 1: enrich — never throws, gracefully returns {} on failure
+      try {
+        const enrichRes = await apiPost<{ speakers: Record<string, string> }>('/enrich', { text: state.originalTranscript || state.transcript })
+        if (enrichRes.speakers && Object.keys(enrichRes.speakers).length > 0) {
+          dispatch({ type: 'SET_ENRICHED_SPEAKERS', speakers: enrichRes.speakers })
+
+          // Build enriched text in-memory for summarization
+          let enriched = state.originalTranscript || state.transcript
+          for (const [tag, name] of Object.entries(enrichRes.speakers)) {
+            if (name.trim()) enriched = enriched.replaceAll(tag, name.trim())
+          }
+          textForSummary = enriched
+
+          // Save speaker mappings to meta (transcript file stays untouched with SPEAKER_XX)
+          if (state.currentRecordingName) {
+            try {
+              await fetch(`/transcripts/${state.currentRecordingName}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ speakers: enrichRes.speakers }),
+              })
+            } catch {
+              // Non-fatal
+            }
+          }
+        }
+      } catch {
+        // Enrichment failure is non-fatal — continue to summarize
+      }
+
+      // Step 2: summarize using enriched text
+      const res = await apiPost<{ summary: string }>('/summarize', {
+        text: textForSummary,
+        ...(state.currentRecordingName ? { name: state.currentRecordingName } : {}),
+      })
       dispatch({ type: 'SET_SUMMARY', markdown: res.summary })
     } catch (err) {
       dispatch({ type: 'SET_SUMMARIZING', value: false })
       dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
     }
-  }, [state.transcript])
+  }, [state.transcript, state.originalTranscript, state.currentRecordingName])
 
   const handleSummaryDismiss = useCallback(() => {
     dispatch({ type: 'DISMISS_SUMMARY' })
@@ -373,6 +460,16 @@ export default function App() {
     try {
       const data = await fetchTranscript(id)
       dispatch({ type: 'SET_TRANSCRIPT', text: data.text, model: data.meta.model })
+      dispatch({ type: 'SET_RECORDING_NAME', name: id })
+      if (data.speakers_list && data.speakers_list.length > 0) {
+        dispatch({ type: 'SET_SPEAKERS_LIST', list: data.speakers_list })
+      }
+      if (data.speakers && Object.keys(data.speakers).length > 0) {
+        dispatch({ type: 'SET_ENRICHED_SPEAKERS', speakers: data.speakers })
+      }
+      if (data.summary) {
+        dispatch({ type: 'SET_SUMMARY', markdown: data.summary })
+      }
     } catch (err) {
       dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
     }
@@ -381,6 +478,44 @@ export default function App() {
   const handleTranscriptChange = useCallback((text: string) => {
     dispatch({ type: 'UPDATE_TRANSCRIPT', text })
   }, [])
+
+  const handleExport = useCallback(async (destination: 'confluence' | 'notion') => {
+    dispatch({ type: 'SET_EXPORTING', value: true })
+    try {
+      const res = await apiPost<{ status: string; url: string }>('/export', {
+        destination,
+        title: state.currentRecordingName ?? 'Meeting Transcript',
+        transcript: state.transcript,
+        summary: state.summaryMarkdown,
+      })
+      dispatch({ type: 'SET_EXPORT_RESULT', url: res.url })
+    } catch (err) {
+      dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
+    } finally {
+      dispatch({ type: 'SET_EXPORTING', value: false })
+    }
+  }, [state.transcript, state.summaryMarkdown, state.currentRecordingName])
+
+  const handleLoadTestFile = useCallback(async () => {
+    const path = state.integrations.test_file_path
+    if (!path) return
+    try {
+      dispatch({ type: 'SET_STATUS', status: 'transcribing', message: 'Processing test file…' })
+      await apiPost('/test/process', { file: path, model: state.selectedModel })
+    } catch (err) {
+      dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
+    }
+  }, [state.integrations.test_file_path, state.selectedModel])
+
+  const handleDownload = useCallback(() => {
+    const blob = new Blob([state.transcript], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'transcript.txt'
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [state.transcript])
 
   // Provider label
   const providerLabel = models.length === 1 && models[0]?.key === 'azure' ? 'Azure' : 'Gemini'
@@ -421,6 +556,17 @@ export default function App() {
             onSkipProcess={handleSkipProcess}
             onFileUpload={handleFileUpload}
           />
+          {state.integrations.test_file_path && (
+            <div className="px-6 pb-4">
+              <button
+                onClick={() => void handleLoadTestFile()}
+                disabled={isLoading}
+                className="w-full text-xs text-zinc-500 border border-dashed border-zinc-700 rounded px-3 py-2 hover:border-zinc-500 hover:text-zinc-400 disabled:opacity-40"
+              >
+                [DEV] Load test file
+              </button>
+            </div>
+          )}
         </aside>
 
         {/* Transcript panel */}
@@ -431,13 +577,21 @@ export default function App() {
             transcriptModel={state.transcriptModel}
             onTranscriptChange={handleTranscriptChange}
             summaryMarkdown={state.summaryMarkdown}
-            onSummarize={handleSummarize}
+            onEnrichAndSummarize={handleEnrichAndSummarize}
+            enrichedSpeakers={state.enrichedSpeakers}
+            speakersList={state.speakersList}
+            currentRecordingName={state.currentRecordingName}
             onSummaryDismiss={handleSummaryDismiss}
             isSummarizing={state.isSummarizing}
             history={state.history}
             onLoadHistory={handleLoadHistory}
             onDeleteHistory={handleDeleteHistory}
             isLoading={isLoading}
+            isExporting={state.isExporting}
+            lastExportUrl={state.lastExportUrl}
+            onExport={handleExport}
+            onDownload={handleDownload}
+            integrations={state.integrations}
           />
         </main>
       </div>

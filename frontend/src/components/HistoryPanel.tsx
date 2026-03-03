@@ -16,6 +16,7 @@ type HistoryItem = {
   source: string
   model: string
   created_at: string
+  has_summary?: boolean
 }
 
 type HistoryPanelProps = {
@@ -76,7 +77,12 @@ export function HistoryPanel({ items, onLoad, onDelete }: HistoryPanelProps) {
               onClick={() => onLoad(item.id, item.source)}
             >
               <div className="flex flex-col min-w-0 flex-1">
-                <span className="text-sm text-zinc-200 truncate">{item.source}</span>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="text-sm text-zinc-200 truncate">{item.source}</span>
+                  {item.has_summary && (
+                    <span className="shrink-0 text-xs px-1 py-0.5 rounded bg-zinc-700 text-zinc-400 leading-none">S</span>
+                  )}
+                </div>
                 <span className="text-xs text-zinc-500">
                   {formatDate(item.created_at)}{item.model ? ` · ${item.model}` : ''}
                 </span>

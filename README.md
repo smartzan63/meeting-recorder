@@ -8,11 +8,13 @@ Open `http://localhost:8080`, click **Start Recording**, talk, click **Stop Reco
 
 - One-button recording control via OBS WebSocket
 - Cloud transcription + speaker diarization — no local GPU needed
-- Speaker name editor — rename `SPEAKER_00` / `SPEAKER_01` to real names, updates live
-- Summarize button — renders formatted markdown summary
+- Speaker name editor — rename `SPEAKER_00` / `SPEAKER_01` to real names; names are saved automatically and restored on next load
+- AI speaker enrichment — identifies real names from conversation context and pre-fills the name editor
+- Enrich & Summarise — generates a formatted markdown summary; auto-saved to disk
 - File upload — process any audio/video file (M4A, WAV, MP4, MKV…) without OBS
-- Transcript history — collapsible panel of past runs, click to reload any transcript
-- Two AI provider options: **Google Gemini** and **Azure AI Speech + Azure OpenAI** — works on any OS
+- Transcript history — collapsible panel of past runs; click to reload transcript, speaker names, and summary
+- Export to Confluence (real REST API) or Notion; optional full transcript via `EXPORT_INCLUDE_TRANSCRIPT`
+- Three AI provider options: **Google Gemini**, **Azure AI Speech + Azure OpenAI**, and **Mock** (no API keys, instant canned output for UI testing)
 - Runs in Docker — no Python environment setup required
 
 ## Prerequisites
@@ -51,7 +53,7 @@ docker compose logs -f         # tail logs
 docker compose down            # stop
 ```
 
-Recordings and transcripts are volume-mounted to `./recordings/` and `./transcripts/` and persist across container restarts.
+Recordings, transcripts, and summaries are stored under `./data/` (volume-mounted) and persist across container restarts.
 
 ## OBS setup (one-time)
 
@@ -67,12 +69,12 @@ Recordings and transcripts are volume-mounted to `./recordings/` and `./transcri
 
 ### Both platforms
 
-3. Set the OBS recording output path to `<project root>/recordings/` — this folder is volume-mounted into the container.
+3. Set the OBS recording output path to `<project root>/data/audio/` — this folder is volume-mounted into the container.
 4. Enable the WebSocket server: **Tools → WebSocket Server Settings → Enable WebSocket Server**. Set port `4455` and a password of your choice.
 
 ## Providers
 
-Set `PROVIDER=gemini` or `PROVIDER=azure` in your `.env`.
+Set `PROVIDER=gemini`, `PROVIDER=azure`, or `PROVIDER=mock` in your `.env`.
 
 ### Gemini (default)
 
@@ -91,7 +93,7 @@ Requires two Azure resources:
 | Resource | Purpose |
 |---|---|
 | Azure AI Speech (S0) | Transcription + speaker diarization via Fast Transcription API |
-| Azure OpenAI | Summarization — deploy a chat-completions model (e.g. `gpt-5-mini`) |
+| Azure OpenAI | Summarization and speaker name enrichment — deploy a chat-completions model (e.g. `gpt-5.2`) |
 
 Azure AI Speech Fast Transcription API is recommended by Microsoft for meeting recordings — it handles files up to 1 GB with no file size limit, unlike the 25 MB cap on Azure OpenAI audio endpoints.
 
@@ -101,7 +103,7 @@ Copy `.env.example` to `.env`. The file is never committed (`.gitignore`).
 
 | Variable | Default | Description |
 |---|---|---|
-| `PROVIDER` | `gemini` | AI provider: `gemini` or `azure` |
+| `PROVIDER` | `gemini` | AI provider: `gemini`, `azure`, or `mock` |
 | `OBS_PASSWORD` | — | OBS WebSocket password |
 | `OBS_HOST` | `localhost` | OBS WebSocket host |
 | `OBS_PORT` | `4455` | OBS WebSocket port |
@@ -110,34 +112,46 @@ Copy `.env.example` to `.env`. The file is never committed (`.gitignore`).
 | `AZURE_SPEECH_REGION` | — | Azure Speech resource region (e.g. `westeurope`) |
 | `AZURE_OPENAI_ENDPOINT` | — | Azure OpenAI endpoint URL |
 | `AZURE_OPENAI_KEY` | — | Azure OpenAI key |
-| `AZURE_OPENAI_DEPLOYMENT` | `gpt-5-mini` | Azure OpenAI deployment name |
-| `RECORDINGS_DIR` | `./recordings` | Where audio files are saved |
-| `TRANSCRIPTS_DIR` | `./transcripts` | Where transcripts are saved |
+| `AZURE_OPENAI_DEPLOYMENT` | `gpt-5.2` | Azure OpenAI deployment name |
+| `RECORDINGS_DIR` | `./data/audio` | Where audio files are saved |
+| `TRANSCRIPTS_DIR` | `./data/transcripts` | Where transcript `.txt` and `.json` files are saved |
+| `SUMMARIES_DIR` | `./data/summaries` | Where summary files are auto-saved |
+| `CONFLUENCE_URL` | — | Confluence base URL (e.g. `https://yourcompany.atlassian.net`) |
+| `CONFLUENCE_EMAIL` | — | Atlassian account email |
+| `CONFLUENCE_TOKEN` | — | Atlassian API token |
+| `CONFLUENCE_SPACE_KEY` | — | Confluence space key (e.g. `ENG`) |
+| `CONFLUENCE_PARENT_PAGE_ID` | — | ID of the parent page for exported meeting notes |
+| `NOTION_TOKEN` | — | Notion integration token |
+| `NOTION_DATABASE_ID` | — | Notion database to add pages to |
+| `EXPORT_INCLUDE_TRANSCRIPT` | `false` | Set to `true` to include full transcript in Confluence/Notion exports |
 | `PORT` | `8080` | Web server port |
 
 ## Architecture
 
 ```
-OBS (host) ──websocket──▶ obs.py ──▶ app.py (FastAPI + WebSocket)
-                                          │
-                                    pipeline.py
-                                          │
-                              ffmpeg (MKV → WAV)
-                                          │
-                          ┌───────────────┴───────────────┐
-                     PROVIDER=gemini               PROVIDER=azure
-                          │                               │
-                 Gemini Files API              Azure AI Speech
-                 generate_content             Fast Transcription API
-                 (transcription +             (transcription +
-                  diarization +                diarization)
-                  summarization)                          │
-                                              Azure OpenAI
-                                              (summarization)
-                          └───────────────┬───────────────┘
-                                    transcripts/{uuid}/
-                                          │
-                                  WebSocket ──▶ browser UI
+OBS (host) ──websocket──▶ app.py (FastAPI + WebSocket)
+                                │
+                          pipeline.py
+                                │
+                    ffmpeg (MKV/MP4 → WAV)
+                                │
+            ┌───────────────────┼───────────────────┐
+       PROVIDER=gemini    PROVIDER=azure        PROVIDER=mock
+            │                   │                    │
+   Gemini Files API    Azure AI Speech          canned output
+   generate_content    Fast Transcription API   (no API call)
+   (transcription +    (transcription +
+    diarization +       diarization)
+    summarization)           │
+                     Azure OpenAI
+                     (enrichment +
+                      summarization)
+            └───────────────────┼───────────────────┘
+                                │
+              data/transcripts/{name}.txt + .json
+              data/summaries/{name}.txt
+                                │
+                    WebSocket ──▶ browser UI (React)
 ```
 
 | Component | Tool |
@@ -147,14 +161,16 @@ OBS (host) ──websocket──▶ obs.py ──▶ app.py (FastAPI + WebSocket
 | Windows system audio | WASAPI Desktop Audio (built into OBS) |
 | OBS control | `obsws-python` (WebSocket port 4455) |
 | Backend | Python FastAPI + WebSocket |
-| Frontend | Single HTML page, vanilla JS, marked.js |
+| Frontend | React + Vite + Tailwind (served as static build) |
 | Audio conversion | ffmpeg |
 
 ## Testing without OBS
 
-Use the **Process a file** section in the UI to upload any audio/video file directly — no OBS needed.
+Use the **Choose File** / **Process File** section in the UI to upload any audio/video file directly — no OBS needed.
 
-Or from the command line:
+For UI testing with no API keys at all, set `PROVIDER=mock` in `.env` — the backend returns a canned two-speaker transcript instantly.
+
+Or run the pipeline directly from the command line:
 
 ```bash
 python test_pipeline.py path/to/recording.wav

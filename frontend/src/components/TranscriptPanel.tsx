@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import { FileAudio, Loader2, Copy, Check } from 'lucide-react'
+import { useMemo, useState, useEffect } from 'react'
+import { FileAudio, Loader2, Copy, Check, Download, Link, FileText } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -11,6 +11,7 @@ type HistoryItem = {
   source: string
   model: string
   created_at: string
+  has_summary?: boolean
 }
 
 type TranscriptPanelProps = {
@@ -19,13 +20,21 @@ type TranscriptPanelProps = {
   transcriptModel: string
   onTranscriptChange: (text: string) => void
   summaryMarkdown: string
-  onSummarize: () => Promise<void>
+  onEnrichAndSummarize: () => Promise<void>
+  enrichedSpeakers?: Record<string, string>
+  speakersList?: string[]
+  currentRecordingName: string | null
   onSummaryDismiss: () => void
   isSummarizing: boolean
   history: HistoryItem[]
   onLoadHistory: (id: string, source: string) => void
   onDeleteHistory: (id: string) => Promise<void>
   isLoading: boolean
+  isExporting: boolean
+  lastExportUrl: string | null
+  onExport: (destination: 'confluence' | 'notion') => Promise<void>
+  onDownload: () => void
+  integrations: { confluence: boolean; notion: boolean }
 }
 
 const SPEAKER_COLORS = [
@@ -47,18 +56,59 @@ export function TranscriptPanel({
   transcriptModel,
   onTranscriptChange,
   summaryMarkdown,
-  onSummarize,
+  onEnrichAndSummarize,
+  enrichedSpeakers,
+  speakersList,
+  currentRecordingName,
   onSummaryDismiss,
   isSummarizing,
   history,
   onLoadHistory,
   onDeleteHistory,
   isLoading,
+  isExporting,
+  lastExportUrl,
+  onExport,
+  onDownload,
+  integrations,
 }: TranscriptPanelProps) {
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({})
   const [copied, setCopied] = useState(false)
 
-  const speakers = useMemo(() => extractSpeakers(originalTranscript), [originalTranscript])
+  // Prefer the canonical list stored at transcription time; fall back to scanning the text
+  const speakers = useMemo(
+    () => (speakersList && speakersList.length > 0 ? speakersList : extractSpeakers(originalTranscript)),
+    [speakersList, originalTranscript],
+  )
+
+  // Auto-populate speaker names from enrichment results — don't overwrite names the user has already typed
+  useEffect(() => {
+    if (!enrichedSpeakers || Object.keys(enrichedSpeakers).length === 0) return
+
+    setSpeakerNames((prev) => {
+      const updated = { ...prev }
+      let changed = false
+      for (const [tag, name] of Object.entries(enrichedSpeakers)) {
+        if (speakers.includes(tag) && !prev[tag]?.trim()) {
+          updated[tag] = name
+          changed = true
+        }
+      }
+      if (!changed) return prev
+
+      // Rebuild the displayed transcript with all substitutions applied
+      let rebuilt = originalTranscript
+      for (const [speakerTag, speakerName] of Object.entries(updated)) {
+        if (speakerName.trim()) {
+          rebuilt = rebuilt.replaceAll(speakerTag, speakerName.trim())
+        }
+      }
+      onTranscriptChange(rebuilt)
+
+      return updated
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enrichedSpeakers])
 
   function handleSpeakerChange(tag: string, name: string) {
     const updated = { ...speakerNames, [tag]: name }
@@ -72,6 +122,15 @@ export function TranscriptPanel({
       }
     }
     onTranscriptChange(rebuilt)
+
+    // Persist to backend on every change so names survive page reload
+    if (currentRecordingName) {
+      void fetch(`/transcripts/${currentRecordingName}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ speakers: updated }),
+      })
+    }
   }
 
   function handleCopy() {
@@ -166,19 +225,78 @@ export function TranscriptPanel({
             </pre>
           </div>
 
-          {/* Summarize button */}
-          {!summaryMarkdown && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void onSummarize()}
-              disabled={isSummarizing}
-              className="self-start border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 gap-1.5"
-            >
-              {isSummarizing && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-              {isSummarizing ? 'Summarizing…' : 'Summarize'}
-            </Button>
-          )}
+          {/* Export row */}
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onDownload}
+                disabled={isExporting || isLoading}
+                className="border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 gap-1.5"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Download .txt
+              </Button>
+              {integrations.confluence && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void onExport('confluence')}
+                  disabled={isExporting || isLoading}
+                  className="border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 gap-1.5"
+                >
+                  {isExporting ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Link className="h-3.5 w-3.5" />
+                  )}
+                  Confluence
+                </Button>
+              )}
+              {integrations.notion && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void onExport('notion')}
+                  disabled={isExporting || isLoading}
+                  className="border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 gap-1.5"
+                >
+                  {isExporting ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <FileText className="h-3.5 w-3.5" />
+                  )}
+                  Notion
+                </Button>
+              )}
+            </div>
+            {lastExportUrl && (
+              <p className="text-xs text-zinc-400">
+                Exported:{' '}
+                <a
+                  href={lastExportUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline hover:text-zinc-200"
+                >
+                  {lastExportUrl}
+                </a>
+              </p>
+            )}
+          </div>
+
+          {/* Enrich & Summarise button — always visible so users can re-run */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void onEnrichAndSummarize()}
+            disabled={isSummarizing}
+            className="self-start border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 gap-1.5"
+          >
+            {isSummarizing && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            {isSummarizing ? 'Enriching…' : summaryMarkdown ? 'Re-enrich & Summarise' : 'Enrich & Summarise'}
+          </Button>
         </div>
       )}
 

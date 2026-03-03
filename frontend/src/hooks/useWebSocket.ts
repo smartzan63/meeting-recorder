@@ -8,6 +8,7 @@ export type WsMessage = {
   text?: string
   model?: string
   id?: string
+  speakers_list?: string[]
 }
 
 export function useWebSocket(): { lastMessage: WsMessage | null } {

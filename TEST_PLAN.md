@@ -21,7 +21,7 @@ Traditional test pyramid inverted for AI-assisted development:
 **What runs:** Real Docker container, real FastAPI backend, real React frontend.
 
 **What is mocked:**
-- OBS — replaced by a fake WebSocket server on port `4456`. Responds to `StartRecord`/`StopRecord`, copies a fixture file into `recordings/` on stop, returns a valid file path. Real OBS stays on `4455` and can run simultaneously without conflict.
+- OBS — replaced by a fake WebSocket server on port `4456`. Responds to `StartRecord`/`StopRecord`, copies a fixture file into `data/audio/` on stop, returns a valid file path. Real OBS stays on `4455` and can run simultaneously without conflict.
 - LLM provider — `PROVIDER=mock` mode in the backend returns a canned transcript instantly with no API call. Transcript includes two speakers (`SPEAKER_00`, `SPEAKER_01`) so the speaker editor is exercised in every test run.
 
 **What is tested:**
@@ -29,7 +29,16 @@ All scenarios in `SCENARIOS.md` except the real OBS happy path (S2.1–S2.4 with
 
 **When it runs:** On demand — run before any UI change is considered done.
 
-**How to run:** TBD (docker compose profile or separate env file — see Open Questions).
+**How to run Level 1:**
+1. `docker-compose -f docker-compose.test.yml up --build`
+2. Open http://localhost:8181
+3. Run scenarios from SCENARIOS.md using Claude in Chrome (or manually)
+4. App uses mock OBS (port 4456) and PROVIDER=mock — no real OBS or LLM keys needed
+
+**Infrastructure:**
+- `test/mock_obs_server.py` — fake OBS WebSocket server (obsws v5 protocol)
+- `config.py` / `pipeline.py` PROVIDER=mock — returns canned transcript instantly
+- `docker-compose.test.yml` — wires everything together
 
 ---
 
@@ -80,17 +89,17 @@ Used to verify transcript display, speaker editor, copy, summarize, and history 
 
 ---
 
-## Open Questions
+## Open Questions (Resolved)
 
-These need to be decided before implementation starts:
+1. **Level 1 run trigger** — on demand only. The docker-compose approach (`docker-compose -f docker-compose.test.yml up --build`) makes it explicit and intentional.
 
-1. **Level 1 run trigger** — on demand only, or also automatically before commit (like Level 2)?
+2. **Test environment isolation** — separate container with isolated named volumes (`data/audio`, `data/transcripts`, `data/summaries`). Test transcripts never appear in the real history. Resolved by `docker-compose.test.yml`.
 
-2. **Test environment isolation** — should Level 1 tests run against a separate container with isolated volumes (so test transcripts don't appear in real history), or is the same container acceptable if tests clean up after themselves?
+3. **Mock transcript format** — two speakers (`SPEAKER_00`, `SPEAKER_01`) as shown in the canned transcript above, so the speaker editor is exercised on every Level 1 run.
 
-3. **`smoke.wav` source** — use a committed placeholder that gets replaced, or record one now and commit it?
+4. **`smoke.wav` source** — recorded separately, not committed. See `test/fixtures/README.md` for instructions on where to place it.
 
-4. **Level 2 smoke test assertion strength** — "transcript is non-empty" or "transcript contains specific words"? Specific words is more meaningful but fragile across providers.
+5. **Level 2 assertion strength** — "transcript contains specific words": check that the transcript contains "testing" and "recording". More meaningful than non-empty, and robust enough across providers given the controlled audio.
 
 ---
 

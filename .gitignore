@@ -6,6 +6,7 @@ recordings/*
 !recordings/.gitkeep
 transcripts/*
 !transcripts/.gitkeep
+data/
 
 # Test recordings — may contain personal audio
 test_recordings/

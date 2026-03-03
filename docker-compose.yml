@@ -10,8 +10,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./recordings:/app/recordings
-      - ./transcripts:/app/transcripts
+      - ./data:/app/data
+      - ./app.py:/app/app.py:ro
+      - ./pipeline.py:/app/pipeline.py:ro
+      - ./config.py:/app/config.py:ro
     dns:
       - 8.8.8.8
       - 8.8.4.4
