@@ -1,0 +1,38 @@
+# Level 1 test environment: real app + mock OBS + mock LLM provider
+# Usage:
+#   docker-compose -f docker-compose.test.yml up --build
+# Then open http://localhost:8181 and run scenarios from SCENARIOS.md
+
+services:
+  mock-obs:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock-obs
+    ports:
+      - "4456:4456"
+    environment:
+      - OBS_PORT=4456
+      - RECORDINGS_DIR=/app/recordings
+    volumes:
+      - recordings:/app/recordings
+
+  app:
+    build:
+      context: .
+    ports:
+      - "8181:8080"
+    environment:
+      - PROVIDER=mock
+      - OBS_HOST=mock-obs
+      - OBS_PORT=4456
+      - RECORDINGS_DIR=/app/recordings
+      - TRANSCRIPTS_DIR=/app/transcripts
+    volumes:
+      - recordings:/app/recordings
+      - transcripts:/app/transcripts
+    depends_on:
+      - mock-obs
+
+volumes:
+  recordings:
+  transcripts:

@@ -6,6 +6,7 @@ recordings/*
 !recordings/.gitkeep
 transcripts/*
 !transcripts/.gitkeep
+data/
 
 # Test recordings — may contain personal audio
 test_recordings/
@@ -28,3 +29,7 @@ env/
 .idea/
 .vscode/
 *.swp
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/

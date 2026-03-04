@@ -1,6 +1,14 @@
+# ── Stage 1: build the React frontend ─────────────────────────────────────────
+FROM node:22-slim AS frontend-builder
+WORKDIR /frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+# ── Stage 2: Python backend ────────────────────────────────────────────────────
 FROM python:3.11-slim
 
-# ffmpeg is the only native dep — used for audio conversion before Gemini upload
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
@@ -12,6 +20,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py pipeline.py obs.py config.py ./
 COPY static/ ./static/
+
+# Copy built frontend
+COPY --from=frontend-builder /frontend/dist ./frontend/dist
 
 RUN mkdir -p recordings transcripts
 
