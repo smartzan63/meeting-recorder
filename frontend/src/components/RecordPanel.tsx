@@ -1,7 +1,6 @@
 import { useRef, useState, useCallback, useEffect } from 'react'
 import { Loader2 } from 'lucide-react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -29,8 +28,6 @@ type RecordPanelProps = {
   models: Model[]
   selectedModel: string
   onModelChange: (key: string) => void
-  translateEnabled: boolean
-  onTranslateChange: (v: boolean) => void
   savedWavPath: string | null
   defaultRecordingName: string
   showSaveDialog: boolean
@@ -41,6 +38,8 @@ type RecordPanelProps = {
   onProcessNow: () => Promise<void>
   onSkipProcess: () => void
   onFileUpload: (file: File) => Promise<void>
+  onDismissError: () => Promise<void>
+  onCancelSave: () => void
 }
 
 function formatTimer(seconds: number): string {
@@ -56,8 +55,6 @@ export function RecordPanel({
   models,
   selectedModel,
   onModelChange,
-  translateEnabled,
-  onTranslateChange,
   savedWavPath,
   defaultRecordingName,
   showSaveDialog,
@@ -68,6 +65,8 @@ export function RecordPanel({
   onProcessNow,
   onSkipProcess,
   onFileUpload,
+  onDismissError,
+  onCancelSave,
 }: RecordPanelProps) {
   const [saveName, setSaveName] = useState('')
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
@@ -86,8 +85,6 @@ export function RecordPanel({
   const isTranscribing = status === 'transcribing'
 
   const multipleModels = models.length > 1
-  const isAzureOnly = models.length === 1 && models[0]?.key === 'azure'
-  const showTranslate = !isAzureOnly
 
   const handleRecordClick = useCallback(async () => {
     if (isRecording) {
@@ -152,26 +149,6 @@ export function RecordPanel({
         </div>
       )}
 
-      {/* Translate toggle */}
-      {showTranslate && (
-        <div className="flex items-center gap-3">
-          <Switch
-            checked={translateEnabled}
-            onCheckedChange={onTranslateChange}
-            disabled={isBusy}
-            id="translate-toggle"
-          />
-          <label
-            htmlFor="translate-toggle"
-            className={cn(
-              'text-sm select-none',
-              isBusy ? 'text-zinc-600' : 'text-zinc-300 cursor-pointer',
-            )}
-          >
-            Translate to English
-          </label>
-        </div>
-      )}
 
       {/* Record button */}
       <div className="relative flex items-center justify-center">
@@ -220,6 +197,14 @@ export function RecordPanel({
           <span className={status === 'error' ? 'text-red-400' : undefined}>
             {statusMessage}
           </span>
+          {status === 'error' && (
+            <button
+              onClick={() => void onDismissError()}
+              className="ml-1 text-xs text-zinc-500 underline hover:text-zinc-300"
+            >
+              Dismiss
+            </button>
+          )}
         </div>
       )}
 
@@ -293,7 +278,7 @@ export function RecordPanel({
       </div>
 
       {/* Save dialog */}
-      <Dialog open={showSaveDialog}>
+      <Dialog open={showSaveDialog} onOpenChange={(open) => { if (!open) onCancelSave() }}>
         <DialogContent className="bg-zinc-900 border-zinc-700 text-zinc-100">
           <DialogHeader>
             <DialogTitle>Save Recording</DialogTitle>
@@ -311,7 +296,7 @@ export function RecordPanel({
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() => setSaveName('')}
+              onClick={onCancelSave}
               className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
             >
               Cancel

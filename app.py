@@ -92,6 +92,13 @@ app = FastAPI(lifespan=lifespan)
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+@app.post("/reset")
+async def reset_state():
+    """Reset state to idle — use to recover from a stuck error state."""
+    await _send_status("idle")
+    return {"state": "idle"}
+
+
 @app.get("/integrations")
 async def integrations():
     return {
@@ -221,7 +228,10 @@ async def enrich(body: dict):
         return {"speakers": {}}
     loop = asyncio.get_running_loop()
     try:
-        speakers = await loop.run_in_executor(None, lambda: pipeline.enrich_transcript(text))
+        model_key = (body.get("model") or config.DEFAULT_MODEL).strip()
+        if not _valid_model_key(model_key):
+            model_key = _default_model_key()
+        speakers = await loop.run_in_executor(None, lambda: pipeline.enrich_transcript(text, model_key))
         return {"speakers": speakers}
     except Exception as e:
         logger.warning("Enrichment failed (non-fatal): %s", e)
@@ -236,7 +246,10 @@ async def summarize(body: dict):
     name = (body.get("name") or "").strip()
     loop = asyncio.get_running_loop()
     try:
-        summary = await loop.run_in_executor(None, lambda: pipeline.summarize_transcript(text))
+        model_key = (body.get("model") or config.DEFAULT_MODEL).strip()
+        if not _valid_model_key(model_key):
+            model_key = _default_model_key()
+        summary = await loop.run_in_executor(None, lambda: pipeline.summarize_transcript(text, model_key))
         if name:
             summaries_dir = Path(config.SUMMARIES_DIR)
             summaries_dir.mkdir(parents=True, exist_ok=True)
@@ -267,8 +280,29 @@ async def update_transcript(transcript_id: str, body: dict):
 async def export_transcript(body: dict):
     destination = (body.get("destination") or "").strip()
     title = (body.get("title") or "Untitled Recording").strip()
-    transcript = (body.get("transcript") or "").strip()
     summary = (body.get("summary") or "").strip()
+    transcript_id = (body.get("id") or "").strip()
+
+    if transcript_id:
+        # Load original transcript and apply current speaker substitution server-side
+        txt_path = Path(config.TRANSCRIPTS_DIR) / f"{transcript_id}.txt"
+        if not txt_path.exists():
+            return JSONResponse(status_code=404, content={"error": f"Transcript not found: {transcript_id}"})
+        original = txt_path.read_text(encoding="utf-8")
+        json_path = Path(config.TRANSCRIPTS_DIR) / f"{transcript_id}.json"
+        meta = json.loads(json_path.read_text()) if json_path.exists() else {}
+        speakers = meta.get("speakers", {})
+        transcript = original
+        for tag, name in speakers.items():
+            if name.strip():
+                transcript = transcript.replace(tag, name.strip())
+        # Load saved summary if not provided in body
+        if not summary:
+            summary_path = Path(config.SUMMARIES_DIR) / f"{transcript_id}.txt"
+            if summary_path.exists():
+                summary = summary_path.read_text(encoding="utf-8")
+    else:
+        transcript = (body.get("transcript") or "").strip()
 
     if not transcript:
         return JSONResponse(status_code=400, content={"error": "No transcript provided"})

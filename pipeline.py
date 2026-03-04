@@ -156,57 +156,103 @@ def _format_azure_transcript(data: dict) -> str:
     return "\n\n".join(lines)
 
 
-def enrich_transcript(transcript: str) -> dict[str, str]:
+_ENRICH_PROMPT = (
+    "You are analyzing a meeting transcript. Identify the real names of the speakers "
+    "if they can be determined from the conversation context (e.g. someone is addressed "
+    "by name, introduces themselves, or signs off with their name).\n\n"
+    "Return ONLY a JSON object mapping speaker labels to names, e.g.:\n"
+    '{{"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"}}\n\n'
+    "If a speaker's name cannot be determined, omit them from the result.\n"
+    "If no names can be determined at all, return an empty object: {{}}\n\n"
+    "Do not include any explanation, only the JSON object.\n\n"
+    "Transcript:\n{transcript}"
+)
+
+
+def _parse_speaker_json(raw: str) -> dict[str, str]:
+    import json, re
+    raw = raw.strip()
+    # Strip markdown code fences
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
+    # Try direct parse first
+    try:
+        result = json.loads(raw)
+        if isinstance(result, dict):
+            return {k: v for k, v in result.items() if isinstance(k, str) and isinstance(v, str)}
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # Fallback: extract first {...} block from the response
+    match = re.search(r'\{[^{}]+\}', raw, re.DOTALL)
+    if match:
+        try:
+            result = json.loads(match.group())
+            if isinstance(result, dict):
+                return {k: v for k, v in result.items() if isinstance(k, str) and isinstance(v, str)}
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return {}
+
+
+def enrich_transcript(transcript: str, model_key: str = config.DEFAULT_MODEL) -> dict[str, str]:
     """Identify real speaker names from transcript context. Returns a mapping like
     {"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"} or {} if names cannot be determined.
 
-    Only Azure OpenAI performs a real LLM call. All other providers return {} immediately.
+    Uses Azure OpenAI when PROVIDER=azure, Gemini otherwise.
     Never raises — returns {} on any error.
     """
-    if config.PROVIDER != "azure":
+    if config.PROVIDER == "mock":
         return {}
 
     try:
-        if not config.AZURE_OPENAI_KEY:
-            logger.warning("enrich_transcript: AZURE_OPENAI_KEY not set, skipping enrichment")
-            return {}
+        if config.PROVIDER == "azure":
+            if not config.AZURE_OPENAI_KEY:
+                logger.warning("enrich_transcript: AZURE_OPENAI_KEY not set, skipping enrichment")
+                return {}
 
-        from openai import AzureOpenAI
+            from openai import AzureOpenAI
 
-        client = AzureOpenAI(
-            azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
-            api_key=config.AZURE_OPENAI_KEY,
-            api_version="2025-01-01-preview",
-        )
+            client = AzureOpenAI(
+                azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
+                api_key=config.AZURE_OPENAI_KEY,
+                api_version="2025-01-01-preview",
+            )
+            prompt = _ENRICH_PROMPT.format(transcript=transcript)
+            response = client.chat.completions.create(
+                model=config.AZURE_OPENAI_DEPLOYMENT,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = (response.choices[0].message.content or "").strip()
+            return _parse_speaker_json(raw)
 
-        prompt = (
-            "You are analyzing a meeting transcript. Identify the real names of the speakers "
-            "if they can be determined from the conversation context (e.g. someone is addressed "
-            "by name, introduces themselves, or signs off with their name).\n\n"
-            "Return ONLY a JSON object mapping speaker labels to names, e.g.:\n"
-            '{"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"}\n\n'
-            "If a speaker's name cannot be determined, omit them from the result.\n"
-            "If no names can be determined at all, return an empty object: {}\n\n"
-            "Do not include any explanation, only the JSON object.\n\n"
-            f"Transcript:\n{transcript}"
-        )
+        else:
+            # Gemini provider
+            if not config.GEMINI_API_KEY:
+                logger.warning("enrich_transcript: GEMINI_API_KEY not set, skipping enrichment")
+                return {}
 
-        response = client.chat.completions.create(
-            model=config.AZURE_OPENAI_DEPLOYMENT,
-            messages=[{"role": "user", "content": prompt}],
-        )
+            from google import genai  # type: ignore
 
-        raw = (response.choices[0].message.content or "").strip()
-
-        import json
-        result = json.loads(raw)
-        if not isinstance(result, dict):
-            return {}
-        # Keep only string keys and string values
-        return {k: v for k, v in result.items() if isinstance(k, str) and isinstance(v, str)}
+            model_id = config.MODELS.get(model_key, config.MODELS[config.DEFAULT_MODEL])["model"]
+            client = genai.Client(api_key=config.GEMINI_API_KEY)
+            prompt = _ENRICH_PROMPT.format(transcript=transcript)
+            # Do NOT use response_mime_type="application/json" — it causes the SDK
+            # to misbehave and raise exceptions on valid responses.
+            response = client.models.generate_content(
+                model=model_id,
+                contents=[prompt],
+            )
+            raw = response.text
+            logger.info("enrich_transcript raw response: %r", raw)
+            result = _parse_speaker_json(raw)
+            logger.info("enrich_transcript parsed result: %r", result)
+            return result
 
     except Exception as e:
-        logger.warning("enrich_transcript failed (non-fatal): %s", e)
+        logger.warning("enrich_transcript failed (non-fatal): %s", e, exc_info=True)
         return {}
 
 
@@ -220,24 +266,25 @@ _MOCK_SUMMARY = """\
 **Action items:** None"""
 
 
-def summarize_transcript(transcript: str) -> str:
+def summarize_transcript(transcript: str, model_key: str = config.DEFAULT_MODEL) -> str:
     """Summarize a transcript using the configured provider. Returns markdown."""
     if config.PROVIDER == "mock":
         return _MOCK_SUMMARY
     if config.PROVIDER == "azure":
         return _summarize_with_azure(transcript)
-    return _summarize_with_gemini(transcript)
+    return _summarize_with_gemini(transcript, model_key)
 
 
-def _summarize_with_gemini(transcript: str) -> str:
+def _summarize_with_gemini(transcript: str, model_key: str = config.DEFAULT_MODEL) -> str:
     if not config.GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is not set")
 
     from google import genai  # type: ignore
 
+    model_id = config.MODELS.get(model_key, config.MODELS[config.DEFAULT_MODEL])["model"]
     client = genai.Client(api_key=config.GEMINI_API_KEY)
     response = client.models.generate_content(
-        model=config.MODELS["gemini"]["model"],
+        model=model_id,
         contents=[_summary_prompt(transcript)],
     )
     return response.text
@@ -262,7 +309,7 @@ def _summarize_with_azure(transcript: str) -> str:
 
 
 def _summary_prompt(transcript: str) -> str:
-    return f"""Summarize this meeting transcript. Be concise and structured.
+    return f"""Summarize this meeting transcript. Be concise and structured. Always respond in English regardless of the language of the transcript.
 Include:
 - Key topics discussed
 - Decisions made (if any)
@@ -485,23 +532,156 @@ def export_to_confluence(title: str, transcript: str, summary: str = "") -> str:
     return f"{base_url}/wiki/spaces/{config.CONFLUENCE_SPACE_KEY}/pages/{page_id}"
 
 
-def export_to_notion(title: str, transcript: str, summary: str = "") -> str:
+def _rich_text(text: str) -> list[dict]:
+    """Parse **bold** markers into a Notion rich_text array."""
+    import re
+    parts: list[dict] = []
+    for seg in re.split(r'(\*\*[^*]+\*\*)', text):
+        if not seg:
+            continue
+        if seg.startswith('**') and seg.endswith('**') and len(seg) > 4:
+            parts.append({"type": "text", "text": {"content": seg[2:-2]}, "annotations": {"bold": True}})
+        else:
+            parts.append({"type": "text", "text": {"content": seg}})
+    return parts or [{"type": "text", "text": {"content": text}}]
+
+
+def _notion_heading(level: int, text: str) -> dict:
+    htype = f"heading_{level}"
+    return {"object": "block", "type": htype, htype: {"rich_text": _rich_text(text.strip())}}
+
+
+def _notion_bullet(text: str, children: list | None = None) -> dict:
+    payload: dict = {"rich_text": _rich_text(text.strip())}
+    if children:
+        payload["children"] = children
+    return {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": payload}
+
+
+def _notion_paragraph(text: str) -> dict:
+    return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": _rich_text(text.strip())}}
+
+
+def _markdown_to_notion_blocks(markdown: str) -> list[dict]:
+    """Convert markdown text to Notion block objects.
+
+    Handles: # headings, * / - bullets (2-level nesting), **bold**, plain paragraphs.
+    Chunks paragraph text at 2000 chars to respect Notion's rich_text limit.
     """
-    Export transcript to Notion.
+    blocks: list[dict] = []
+    lines = markdown.split('\n')
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        line = raw.rstrip()
+        indent = len(raw) - len(raw.lstrip())
+        i += 1
 
-    MOCK IMPLEMENTATION — replace with real Notion API calls when ready.
+        if not line.strip():
+            continue
 
-    Real implementation should:
-    1. Use NOTION_TOKEN, NOTION_DATABASE_ID from config
-    2. POST to https://api.notion.com/v1/pages
-    3. Set parent.database_id = NOTION_DATABASE_ID
-    4. Add title property, transcript and summary as paragraph blocks
-    5. Return the URL of the created page
+        # Headings
+        if line.lstrip().startswith('### '):
+            blocks.append(_notion_heading(3, line.lstrip()[4:]))
+        elif line.lstrip().startswith('## '):
+            blocks.append(_notion_heading(2, line.lstrip()[3:]))
+        elif line.lstrip().startswith('# '):
+            blocks.append(_notion_heading(1, line.lstrip()[2:]))
+
+        # Top-level bullet
+        elif indent < 4 and (line.lstrip().startswith('* ') or line.lstrip().startswith('- ')):
+            content = line.lstrip()[2:]
+            children: list[dict] = []
+            while i < len(lines):
+                nxt = lines[i]
+                nxt_indent = len(nxt) - len(nxt.lstrip())
+                nxt_stripped = nxt.lstrip()
+                if nxt_stripped and nxt_indent >= 4 and (nxt_stripped.startswith('* ') or nxt_stripped.startswith('- ')):
+                    children.append(_notion_bullet(nxt_stripped[2:]))
+                    i += 1
+                else:
+                    break
+            blocks.append(_notion_bullet(content, children or None))
+
+        # Indented bullet not caught above (orphan)
+        elif line.lstrip().startswith('* ') or line.lstrip().startswith('- '):
+            blocks.append(_notion_bullet(line.lstrip()[2:]))
+
+        # Plain paragraph — chunk at 2000 chars
+        else:
+            text = line.strip()
+            while len(text) > 2000:
+                blocks.append(_notion_paragraph(text[:2000]))
+                text = text[2000:]
+            if text:
+                blocks.append(_notion_paragraph(text))
+
+    return blocks
+
+
+def export_to_notion(title: str, transcript: str, summary: str = "") -> str:
+    """Export transcript (and optional summary) to a Notion database page.
+
+    Creates a new page in the configured NOTION_DATABASE_ID with the transcript
+    and summary as paragraph blocks. Long content is chunked to respect Notion's
+    2000-character-per-text-element limit. Pages with more than 100 blocks are
+    created in batches using the append-children endpoint.
 
     Returns: URL string of the created page.
     Raises: RuntimeError if export fails.
     """
+    import requests as _requests
+
     if not config.NOTION_TOKEN:
         raise RuntimeError("NOTION_TOKEN is not configured")
-    logger.info("MOCK: Would export '%s' to Notion database %s", title, config.NOTION_DATABASE_ID)
-    return f"https://notion.so/mock-page-{title.replace(' ', '-')}"
+    if not config.NOTION_DATABASE_ID:
+        raise RuntimeError("NOTION_DATABASE_ID is not configured")
+
+    headers = {
+        "Authorization": f"Bearer {config.NOTION_TOKEN}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28",
+    }
+
+    # Build all blocks
+    all_blocks: list[dict] = []
+    if summary.strip():
+        all_blocks.append(_notion_heading(2, "Summary"))
+        all_blocks.extend(_markdown_to_notion_blocks(summary.strip()))
+    if config.EXPORT_INCLUDE_TRANSCRIPT and transcript.strip():
+        all_blocks.append(_notion_heading(2, "Full Transcript"))
+        chunk_size = 2000
+        for i in range(0, max(len(transcript.strip()), 1), chunk_size):
+            all_blocks.append(_notion_paragraph(transcript.strip()[i:i + chunk_size]))
+    if not all_blocks:
+        all_blocks.append(_notion_paragraph("No content to export."))
+
+    # Create page with up to 100 initial children (Notion API limit)
+    payload = {
+        "parent": {"database_id": config.NOTION_DATABASE_ID},
+        "properties": {
+            "Name": {"title": [{"type": "text", "text": {"content": title}}]},
+        },
+        "children": all_blocks[:100],
+    }
+    r = _requests.post("https://api.notion.com/v1/pages", headers=headers, json=payload)
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"Notion create failed {r.status_code}: {r.text}")
+
+    page_id = r.json()["id"]
+
+    # Append remaining blocks in batches of 100
+    remaining = all_blocks[100:]
+    while remaining:
+        batch, remaining = remaining[:100], remaining[100:]
+        r = _requests.patch(
+            f"https://api.notion.com/v1/blocks/{page_id}/children",
+            headers=headers,
+            json={"children": batch},
+        )
+        if r.status_code not in (200, 201):
+            raise RuntimeError(f"Notion append blocks failed {r.status_code}: {r.text}")
+
+    # Notion page URL uses the ID without dashes
+    clean_id = page_id.replace("-", "")
+    return f"https://notion.so/{clean_id}"

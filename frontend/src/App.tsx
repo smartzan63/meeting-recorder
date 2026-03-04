@@ -379,6 +379,16 @@ export default function App() {
     dispatch({ type: 'SET_STATUS', status: 'idle' })
   }, [])
 
+  const handleDismissError = useCallback(async () => {
+    await apiPost('/reset')
+    dispatch({ type: 'SET_STATUS', status: 'idle' })
+  }, [])
+
+  const handleCancelSave = useCallback(() => {
+    dispatch({ type: 'SET_STATUS', status: 'idle' })
+    void apiPost('/reset')
+  }, [])
+
   const handleFileUpload = useCallback(async (file: File) => {
     try {
       dispatch({ type: 'SET_STATUS', status: 'transcribing', message: 'Uploading…' })
@@ -405,29 +415,18 @@ export default function App() {
 
       // Step 1: enrich — never throws, gracefully returns {} on failure
       try {
-        const enrichRes = await apiPost<{ speakers: Record<string, string> }>('/enrich', { text: state.originalTranscript || state.transcript })
+        const enrichRes = await apiPost<{ speakers: Record<string, string> }>('/enrich', { text: state.originalTranscript || state.transcript, model: state.selectedModel })
         if (enrichRes.speakers && Object.keys(enrichRes.speakers).length > 0) {
           dispatch({ type: 'SET_ENRICHED_SPEAKERS', speakers: enrichRes.speakers })
 
           // Build enriched text in-memory for summarization
+          // Persistence of merged speaker names is handled by TranscriptPanel's population
+          // effect via onSpeakersPersist — this avoids overwriting user-edited names.
           let enriched = state.originalTranscript || state.transcript
           for (const [tag, name] of Object.entries(enrichRes.speakers)) {
             if (name.trim()) enriched = enriched.replaceAll(tag, name.trim())
           }
           textForSummary = enriched
-
-          // Save speaker mappings to meta (transcript file stays untouched with SPEAKER_XX)
-          if (state.currentRecordingName) {
-            try {
-              await fetch(`/transcripts/${state.currentRecordingName}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ speakers: enrichRes.speakers }),
-              })
-            } catch {
-              // Non-fatal
-            }
-          }
         }
       } catch {
         // Enrichment failure is non-fatal — continue to summarize
@@ -436,6 +435,7 @@ export default function App() {
       // Step 2: summarize using enriched text
       const res = await apiPost<{ summary: string }>('/summarize', {
         text: textForSummary,
+        model: state.selectedModel,
         ...(state.currentRecordingName ? { name: state.currentRecordingName } : {}),
       })
       dispatch({ type: 'SET_SUMMARY', markdown: res.summary })
@@ -444,6 +444,15 @@ export default function App() {
       dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
     }
   }, [state.transcript, state.originalTranscript, state.currentRecordingName])
+
+  const handleSpeakersPersist = useCallback(async (speakers: Record<string, string>) => {
+    if (!state.currentRecordingName) return
+    await fetch(`/transcripts/${state.currentRecordingName}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ speakers }),
+    })
+  }, [state.currentRecordingName])
 
   const handleSummaryDismiss = useCallback(() => {
     dispatch({ type: 'DISMISS_SUMMARY' })
@@ -482,19 +491,29 @@ export default function App() {
   const handleExport = useCallback(async (destination: 'confluence' | 'notion') => {
     dispatch({ type: 'SET_EXPORTING', value: true })
     try {
-      const res = await apiPost<{ status: string; url: string }>('/export', {
-        destination,
-        title: state.currentRecordingName ?? 'Meeting Transcript',
-        transcript: state.transcript,
-        summary: state.summaryMarkdown,
-      })
+      const historyItem = state.history.find(h => h.id === state.currentRecordingName)
+      const sourceTitle = historyItem?.source
+        ? historyItem.source.replace(/\.[^.]+$/, '').replace(/^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-/, '')
+        : null
+      const title = sourceTitle || state.currentRecordingName || 'Meeting Transcript'
+
+      // When we have a saved recording ID, let the backend load originalTranscript + speakers
+      // and apply substitution server-side so exports always reflect the latest speaker names.
+      const exportBody: Record<string, string> = { destination, title, summary: state.summaryMarkdown }
+      if (state.currentRecordingName) {
+        exportBody.id = state.currentRecordingName
+      } else {
+        exportBody.transcript = state.transcript
+      }
+
+      const res = await apiPost<{ status: string; url: string }>('/export', exportBody)
       dispatch({ type: 'SET_EXPORT_RESULT', url: res.url })
     } catch (err) {
       dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
     } finally {
       dispatch({ type: 'SET_EXPORTING', value: false })
     }
-  }, [state.transcript, state.summaryMarkdown, state.currentRecordingName])
+  }, [state.transcript, state.summaryMarkdown, state.currentRecordingName, state.history])
 
   const handleLoadTestFile = useCallback(async () => {
     const path = state.integrations.test_file_path
@@ -543,8 +562,6 @@ export default function App() {
             models={models}
             selectedModel={state.selectedModel}
             onModelChange={(key) => dispatch({ type: 'SET_MODEL', key })}
-            translateEnabled={state.translateEnabled}
-            onTranslateChange={(value) => dispatch({ type: 'SET_TRANSLATE', value })}
             savedWavPath={state.savedWavPath}
             defaultRecordingName={state.defaultRecordingName}
             showSaveDialog={state.showSaveDialog}
@@ -555,6 +572,8 @@ export default function App() {
             onProcessNow={handleProcessNow}
             onSkipProcess={handleSkipProcess}
             onFileUpload={handleFileUpload}
+            onDismissError={handleDismissError}
+            onCancelSave={handleCancelSave}
           />
           {state.integrations.test_file_path && (
             <div className="px-6 pb-4">
@@ -581,6 +600,7 @@ export default function App() {
             enrichedSpeakers={state.enrichedSpeakers}
             speakersList={state.speakersList}
             currentRecordingName={state.currentRecordingName}
+            onSpeakersPersist={handleSpeakersPersist}
             onSummaryDismiss={handleSummaryDismiss}
             isSummarizing={state.isSummarizing}
             history={state.history}

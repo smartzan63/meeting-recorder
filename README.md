@@ -9,11 +9,11 @@ Open `http://localhost:8080`, click **Start Recording**, talk, click **Stop Reco
 - One-button recording control via OBS WebSocket
 - Cloud transcription + speaker diarization — no local GPU needed
 - Speaker name editor — rename `SPEAKER_00` / `SPEAKER_01` to real names; names are saved automatically and restored on next load
-- AI speaker enrichment — identifies real names from conversation context and pre-fills the name editor
-- Enrich & Summarise — generates a formatted markdown summary; auto-saved to disk
+- AI speaker enrichment — identifies real names from conversation context and pre-fills the name editor; user edits are always preserved through re-enrichment
+- Enrich & Summarise — generates a structured English summary regardless of transcript language; auto-saved to disk; shows a warning when speaker names have changed since the last summary
 - File upload — process any audio/video file (M4A, WAV, MP4, MKV…) without OBS
 - Transcript history — collapsible panel of past runs; click to reload transcript, speaker names, and summary
-- Export to Confluence (real REST API) or Notion; optional full transcript via `EXPORT_INCLUDE_TRANSCRIPT`
+- Export to Confluence (real REST API) or Notion — speaker substitution is applied server-side at export time, so correcting a name instantly reflects in all future exports without re-running enrichment; optional full transcript via `EXPORT_INCLUDE_TRANSCRIPT`
 - Three AI provider options: **Google Gemini**, **Azure AI Speech + Azure OpenAI**, and **Mock** (no API keys, instant canned output for UI testing)
 - Runs in Docker — no Python environment setup required
 
@@ -78,13 +78,13 @@ Set `PROVIDER=gemini`, `PROVIDER=azure`, or `PROVIDER=mock` in your `.env`.
 
 ### Gemini (default)
 
-Requires a [Gemini API key](https://aistudio.google.com/apikey). Free tier available.
+Requires a [Gemini API key](https://aistudio.google.com/apikey). Free tier available; connect a billing account for higher quotas and better availability.
 
-Transcription and diarization happen in a single Gemini multimodal call. Summarization also uses Gemini.
+Transcription, diarization, speaker name enrichment, and summarization all use Gemini.
 
-Available models (set via the UI dropdown):
-- `gemini-3-flash-preview` — default, 20 requests/day on free tier
-- `gemini-2.5-flash` — higher free quota, use as fallback
+Available models (set via the UI dropdown at runtime — all operations use the selected model):
+- `gemini-3-flash-preview` — default; low free-tier quota and subject to demand spikes
+- `gemini-2.5-flash` — recommended; higher quota and more stable availability
 
 ### Azure
 
@@ -121,10 +121,18 @@ Copy `.env.example` to `.env`. The file is never committed (`.gitignore`).
 | `CONFLUENCE_TOKEN` | — | Atlassian API token |
 | `CONFLUENCE_SPACE_KEY` | — | Confluence space key (e.g. `ENG`) |
 | `CONFLUENCE_PARENT_PAGE_ID` | — | ID of the parent page for exported meeting notes |
-| `NOTION_TOKEN` | — | Notion integration token |
-| `NOTION_DATABASE_ID` | — | Notion database to add pages to |
+| `NOTION_TOKEN` | — | Notion internal integration token (create at [notion.so/my-integrations](https://www.notion.so/my-integrations)) |
+| `NOTION_DATABASE_ID` | — | ID of the Notion database to add pages to — visible in the database URL after the last `/` and before `?v=` |
 | `EXPORT_INCLUDE_TRANSCRIPT` | `false` | Set to `true` to include full transcript in Confluence/Notion exports |
 | `PORT` | `8080` | Web server port |
+
+### Notion setup
+
+1. Go to [notion.so/my-integrations](https://www.notion.so/my-integrations) → **New integration** → copy the token into `NOTION_TOKEN`
+2. Open your target database in Notion → `···` menu → **Connections** → add your integration
+3. Copy the database ID from the URL into `NOTION_DATABASE_ID`
+
+Both variables must be set for the Notion export button to appear in the UI.
 
 ## Architecture
 
@@ -142,8 +150,8 @@ OBS (host) ──websocket──▶ app.py (FastAPI + WebSocket)
    generate_content    Fast Transcription API   (no API call)
    (transcription +    (transcription +
     diarization +       diarization)
-    summarization)           │
-                     Azure OpenAI
+    enrichment +             │
+    summarization)   Azure OpenAI
                      (enrichment +
                       summarization)
             └───────────────────┼───────────────────┘
@@ -163,6 +171,10 @@ OBS (host) ──websocket──▶ app.py (FastAPI + WebSocket)
 | Backend | Python FastAPI + WebSocket |
 | Frontend | React + Vite + Tailwind (served as static build) |
 | Audio conversion | ffmpeg |
+
+## Scenarios and test plan
+
+`SCENARIOS.md` in the root of the repo describes all user-facing features and expected behavior. It is the source of truth for manual testing and future automated test coverage.
 
 ## Testing without OBS
 

@@ -24,6 +24,7 @@ type TranscriptPanelProps = {
   enrichedSpeakers?: Record<string, string>
   speakersList?: string[]
   currentRecordingName: string | null
+  onSpeakersPersist?: (speakers: Record<string, string>) => void
   onSummaryDismiss: () => void
   isSummarizing: boolean
   history: HistoryItem[]
@@ -60,6 +61,7 @@ export function TranscriptPanel({
   enrichedSpeakers,
   speakersList,
   currentRecordingName,
+  onSpeakersPersist,
   onSummaryDismiss,
   isSummarizing,
   history,
@@ -74,12 +76,24 @@ export function TranscriptPanel({
 }: TranscriptPanelProps) {
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({})
   const [copied, setCopied] = useState(false)
+  const [summaryIsStale, setSummaryIsStale] = useState(false)
 
   // Prefer the canonical list stored at transcription time; fall back to scanning the text
   const speakers = useMemo(
     () => (speakersList && speakersList.length > 0 ? speakersList : extractSpeakers(originalTranscript)),
     [speakersList, originalTranscript],
   )
+
+  // Reset speaker names and stale flag when loading a different recording
+  useEffect(() => {
+    setSpeakerNames({})
+    setSummaryIsStale(false)
+  }, [currentRecordingName])
+
+  // Clear stale flag when a new summary is generated
+  useEffect(() => {
+    if (summaryMarkdown) setSummaryIsStale(false)
+  }, [summaryMarkdown])
 
   // Auto-populate speaker names from enrichment results — don't overwrite names the user has already typed
   useEffect(() => {
@@ -89,7 +103,7 @@ export function TranscriptPanel({
       const updated = { ...prev }
       let changed = false
       for (const [tag, name] of Object.entries(enrichedSpeakers)) {
-        if (speakers.includes(tag) && !prev[tag]?.trim()) {
+        if (!prev[tag]?.trim()) {
           updated[tag] = name
           changed = true
         }
@@ -105,14 +119,19 @@ export function TranscriptPanel({
       }
       onTranscriptChange(rebuilt)
 
+      // Persist the merged result (not raw enrichment) so user edits are respected
+      onSpeakersPersist?.(updated)
+
       return updated
     })
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enrichedSpeakers])
+  }, [enrichedSpeakers, originalTranscript, onTranscriptChange, onSpeakersPersist])
 
   function handleSpeakerChange(tag: string, name: string) {
     const updated = { ...speakerNames, [tag]: name }
     setSpeakerNames(updated)
+
+    // Mark summary as stale — it was generated with the old name
+    if (summaryMarkdown) setSummaryIsStale(true)
 
     // Rebuild display transcript from originalTranscript with all substitutions applied
     let rebuilt = originalTranscript
@@ -123,7 +142,7 @@ export function TranscriptPanel({
     }
     onTranscriptChange(rebuilt)
 
-    // Persist to backend on every change so names survive page reload
+    // Persist to backend on every change so names survive page reload and exports use latest names
     if (currentRecordingName) {
       void fetch(`/transcripts/${currentRecordingName}`, {
         method: 'PUT',
@@ -301,6 +320,11 @@ export function TranscriptPanel({
       )}
 
       {/* Summary */}
+      {summaryIsStale && summaryMarkdown && (
+        <p className="text-xs text-amber-500/80">
+          Speaker names changed — summary may be outdated. Re-enrich & Summarise to update.
+        </p>
+      )}
       {summaryMarkdown && (
         <SummaryCard markdown={summaryMarkdown} onDismiss={onSummaryDismiss} />
       )}
