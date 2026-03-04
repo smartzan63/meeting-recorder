@@ -411,7 +411,9 @@ export default function App() {
     if (!state.transcript) return
     dispatch({ type: 'SET_SUMMARIZING', value: true })
     try {
-      let textForSummary = state.originalTranscript || state.transcript
+      // Start from the display transcript — user-edited names already applied here.
+      // Enrichment can only fill in remaining SPEAKER_XX tags (unnamed speakers).
+      let textForSummary = state.transcript
 
       // Step 1: enrich — never throws, gracefully returns {} on failure
       try {
@@ -419,10 +421,10 @@ export default function App() {
         if (enrichRes.speakers && Object.keys(enrichRes.speakers).length > 0) {
           dispatch({ type: 'SET_ENRICHED_SPEAKERS', speakers: enrichRes.speakers })
 
-          // Build enriched text in-memory for summarization
-          // Persistence of merged speaker names is handled by TranscriptPanel's population
-          // effect via onSpeakersPersist — this avoids overwriting user-edited names.
-          let enriched = state.originalTranscript || state.transcript
+          // Apply enrichment on top of the user-edited transcript so user edits win.
+          // Any SPEAKER_XX already replaced by the user won't be in state.transcript,
+          // so enrichment only fills in tags for speakers the user hasn't named yet.
+          let enriched = state.transcript
           for (const [tag, name] of Object.entries(enrichRes.speakers)) {
             if (name.trim()) enriched = enriched.replaceAll(tag, name.trim())
           }
@@ -491,11 +493,7 @@ export default function App() {
   const handleExport = useCallback(async (destination: 'confluence' | 'notion') => {
     dispatch({ type: 'SET_EXPORTING', value: true })
     try {
-      const historyItem = state.history.find(h => h.id === state.currentRecordingName)
-      const sourceTitle = historyItem?.source
-        ? historyItem.source.replace(/\.[^.]+$/, '').replace(/^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-/, '')
-        : null
-      const title = sourceTitle || state.currentRecordingName || 'Meeting Transcript'
+      const title = state.currentRecordingName || 'Meeting Transcript'
 
       // When we have a saved recording ID, let the backend load originalTranscript + speakers
       // and apply substitution server-side so exports always reflect the latest speaker names.
@@ -513,7 +511,18 @@ export default function App() {
     } finally {
       dispatch({ type: 'SET_EXPORTING', value: false })
     }
-  }, [state.transcript, state.summaryMarkdown, state.currentRecordingName, state.history])
+  }, [state.transcript, state.summaryMarkdown, state.currentRecordingName])
+
+  const handleSummaryChange = useCallback((markdown: string) => {
+    dispatch({ type: 'SET_SUMMARY', markdown })
+    if (state.currentRecordingName) {
+      void fetch(`/transcripts/${state.currentRecordingName}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ summary: markdown }),
+      })
+    }
+  }, [state.currentRecordingName])
 
   const handleLoadTestFile = useCallback(async () => {
     const path = state.integrations.test_file_path
@@ -602,6 +611,7 @@ export default function App() {
             currentRecordingName={state.currentRecordingName}
             onSpeakersPersist={handleSpeakersPersist}
             onSummaryDismiss={handleSummaryDismiss}
+            onSummaryChange={handleSummaryChange}
             isSummarizing={state.isSummarizing}
             history={state.history}
             onLoadHistory={handleLoadHistory}

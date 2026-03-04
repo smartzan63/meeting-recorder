@@ -108,7 +108,9 @@ Prerequisites: OBS is running, WebSocket enabled on port 4455, recording output 
 
 **S5.1 — Transcript renders after pipeline**
 - Right panel shows the transcript text in a scrollable area
-- Header row shows "Transcript" label, model badge, and a Copy button
+- Header row shows "Transcript" label and a model badge
+- A "Copy" button is rendered as an absolute-positioned overlay in the top-right corner of the scrollable transcript area (not in the header row)
+- Transcript text has right padding so content does not overlap the Copy button
 - Speaker editor appears below the header if `SPEAKER_XX` labels are present
 
 **S5.2 — Speaker name editor**
@@ -124,7 +126,7 @@ Prerequisites: OBS is running, WebSocket enabled on port 4455, recording output 
 - Reloading the page and loading the same recording from history restores the saved names
 
 **S5.4 — Copy transcript**
-- Click "Copy"
+- Click the "Copy" button overlaid in the top-right corner of the transcript scrollable area
 - Button briefly shows "Copied" then reverts
 - Clipboard contains the current displayed transcript text (with any speaker name substitutions)
 
@@ -139,22 +141,37 @@ Prerequisites: OBS is running, WebSocket enabled on port 4455, recording output 
 - Summary is rendered as formatted markdown
 - Summary is always generated in English regardless of the transcript language
 - Summary is auto-saved to `data/summaries/{name}.txt` if the recording has a name
+- The summary is built from the display transcript with user-edited speaker names already applied — user edits are never overridden in the summary. Enrichment from AI can only fill in labels for speakers the user has not yet named.
 
 **S6.2 — Toggle raw / formatted**
-- Summary card has a "Raw" button
+- Summary card has a "Raw" button in the header row
 - Clicking it switches to plain text display of the markdown source
 - Clicking "Formatted" switches back to rendered markdown
 
-**S6.3 — Dismiss summary**
+**S6.3 — Copy summary**
+- A "Copy" button appears in the summary card header row, to the left of the "Raw" button
+- Clicking it copies the raw markdown source to the clipboard
+- Button briefly shows "Copied" then reverts
+
+**S6.4 — Edit summary**
+- A pencil icon button appears in the summary card header, to the right of the "Raw" button
+- Clicking the pencil enters edit mode:
+  - A resizable textarea appears containing the raw markdown source
+  - The Raw/Formatted toggle and pencil icon are replaced by a green "Save" button
+- Clicking "Save" OR clicking outside the textarea (blur) exits edit mode and saves changes
+- Edited content updates app state so subsequent exports use the edited version
+- If the recording has been named (`currentRecordingName` is set), the edited summary is also persisted to `data/summaries/{id}.txt` via `PUT /transcripts/{id}` with `{"summary": "..."}` body
+
+**S6.5 — Dismiss summary**
 - Click the X button on the summary card
 - Card disappears, transcript remains visible
 
-**S6.4 — Re-summarize**
+**S6.6 — Re-summarize**
 - After dismissing, the "Enrich & Summarise" button is available again
 - When a summary already exists, the button reads "Re-enrich & Summarise"
 - Clicking it generates a new summary and overwrites the saved file
 
-**S6.5 — Summary outdated banner**
+**S6.7 — Summary outdated banner**
 - If the user edits a speaker name after a summary has been generated, an amber warning appears above the summary card: "Speaker names changed — summary may be outdated. Re-enrich & Summarise to update."
 - The warning disappears when a new summary is generated via "Re-enrich & Summarise"
 - The warning disappears when a different recording is loaded from history
@@ -234,6 +251,7 @@ Prerequisites: OBS is running, WebSocket enabled on port 4455, recording output 
 - If the transcript contains speaker names in context (e.g. someone introduces themselves or is addressed by name), the speaker name inputs are auto-populated with the identified names
 - The displayed transcript immediately substitutes the identified names in place of `SPEAKER_XX` labels
 - Enriched names are only applied to inputs that are currently empty — names already typed by the user are not overwritten
+- Because the summary is built from the display transcript (user edits first, enrichment fills gaps), user-edited names always appear in the generated summary even if Gemini would have returned a different name
 
 **S11.3 — Summary uses identified names**
 - Summary is generated after enrichment completes
@@ -260,6 +278,7 @@ Prerequisites: OBS is running, WebSocket enabled on port 4455, recording output 
 - Button is only shown when `CONFLUENCE_URL`, `CONFLUENCE_TOKEN`, etc. are configured
 - Backend loads the original `SPEAKER_XX` transcript from storage, applies the latest saved speaker mapping, and exports the substituted text
 - Backend creates a Confluence page via REST API and returns the page URL
+- Page title is the recording name the user entered in the "Save Recording" dialog (`currentRecordingName`), not a cleaned-up version of the OBS filename
 - URL is displayed below the export buttons as a link: `Exported: <url>`
 - Export content includes the summary (if available); full transcript is included only when `EXPORT_INCLUDE_TRANSCRIPT=true`
 
@@ -268,7 +287,7 @@ Prerequisites: OBS is running, WebSocket enabled on port 4455, recording output 
 - Button is only shown when `NOTION_TOKEN` and `NOTION_DATABASE_ID` are configured
 - Backend loads the original `SPEAKER_XX` transcript from storage, applies the latest saved speaker mapping, and exports the substituted text
 - Backend creates a Notion page in the configured database and returns the page URL
-- Page title is derived from the source filename with timestamp prefix stripped
+- Page title is the recording name the user entered in the "Save Recording" dialog (`currentRecordingName`), not a cleaned-up version of the OBS filename
 - Summary and transcript are exported with full markdown formatting (headings, bullets, bold)
 - URL is displayed below the export buttons as a link: `Exported: <url>`
 

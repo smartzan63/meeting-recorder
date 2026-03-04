@@ -27,12 +27,15 @@ services:
       - OBS_PORT=4456
       - RECORDINGS_DIR=/app/recordings
       - TRANSCRIPTS_DIR=/app/transcripts
+      - SUMMARIES_DIR=/app/summaries
     volumes:
       - recordings:/app/recordings
       - transcripts:/app/transcripts
+      - summaries:/app/summaries
     depends_on:
       - mock-obs
 
 volumes:
   recordings:
   transcripts:
+  summaries:

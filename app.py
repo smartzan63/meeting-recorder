@@ -262,17 +262,23 @@ async def summarize(body: dict):
 
 @app.put("/transcripts/{transcript_id}")
 async def update_transcript(transcript_id: str, body: dict):
-    """Save speaker name mappings to the transcript meta. Transcript text is never modified."""
+    """Save speaker name mappings and/or summary. Transcript text is never modified."""
     txt = Path(config.TRANSCRIPTS_DIR) / f"{transcript_id}.txt"
     if not txt.exists():
         return JSONResponse(status_code=404, content={"error": "Not found"})
     speakers = body.get("speakers")
-    if not isinstance(speakers, dict):
-        return JSONResponse(status_code=400, content={"error": "speakers dict required"})
-    json_path = Path(config.TRANSCRIPTS_DIR) / f"{transcript_id}.json"
-    meta = json.loads(json_path.read_text()) if json_path.exists() else {}
-    meta["speakers"] = speakers
-    json_path.write_text(json.dumps(meta), encoding="utf-8")
+    if speakers is not None:
+        if not isinstance(speakers, dict):
+            return JSONResponse(status_code=400, content={"error": "speakers must be a dict"})
+        json_path = Path(config.TRANSCRIPTS_DIR) / f"{transcript_id}.json"
+        meta = json.loads(json_path.read_text()) if json_path.exists() else {}
+        meta["speakers"] = speakers
+        json_path.write_text(json.dumps(meta), encoding="utf-8")
+    summary = body.get("summary")
+    if summary is not None:
+        summaries_dir = Path(config.SUMMARIES_DIR)
+        summaries_dir.mkdir(parents=True, exist_ok=True)
+        (summaries_dir / f"{transcript_id}.txt").write_text(summary, encoding="utf-8")
     return {"updated": transcript_id}
 
 

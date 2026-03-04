@@ -26,6 +26,7 @@ type TranscriptPanelProps = {
   currentRecordingName: string | null
   onSpeakersPersist?: (speakers: Record<string, string>) => void
   onSummaryDismiss: () => void
+  onSummaryChange?: (markdown: string) => void
   isSummarizing: boolean
   history: HistoryItem[]
   onLoadHistory: (id: string, source: string) => void
@@ -63,6 +64,7 @@ export function TranscriptPanel({
   currentRecordingName,
   onSpeakersPersist,
   onSummaryDismiss,
+  onSummaryChange,
   isSummarizing,
   history,
   onLoadHistory,
@@ -183,31 +185,11 @@ export function TranscriptPanel({
             <span className="text-xs font-medium uppercase tracking-widest text-zinc-400">
               Transcript
             </span>
-            <div className="flex items-center gap-2">
-              {transcriptModel && (
-                <Badge variant="outline" className="text-xs text-zinc-400 border-zinc-700">
-                  {transcriptModel}
-                </Badge>
-              )}
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 px-2 text-xs text-zinc-400 hover:text-zinc-100 gap-1"
-                onClick={handleCopy}
-              >
-                {copied ? (
-                  <>
-                    <Check className="h-3.5 w-3.5" />
-                    Copied
-                  </>
-                ) : (
-                  <>
-                    <Copy className="h-3.5 w-3.5" />
-                    Copy
-                  </>
-                )}
-              </Button>
-            </div>
+            {transcriptModel && (
+              <Badge variant="outline" className="text-xs text-zinc-400 border-zinc-700">
+                {transcriptModel}
+              </Badge>
+            )}
           </div>
 
           {/* Speaker editor */}
@@ -237,9 +219,27 @@ export function TranscriptPanel({
             </div>
           )}
 
-          {/* Transcript text */}
-          <div className="overflow-y-auto max-h-96 rounded-md border border-zinc-800 bg-zinc-900 p-3">
-            <pre className="whitespace-pre-wrap font-mono text-sm text-zinc-200 leading-relaxed">
+          {/* Transcript text with copy button overlay */}
+          <div className="relative overflow-y-auto max-h-96 rounded-md border border-zinc-800 bg-zinc-900 p-3">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="absolute top-2 right-2 h-7 px-2 text-xs text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800 gap-1"
+              onClick={handleCopy}
+            >
+              {copied ? (
+                <>
+                  <Check className="h-3.5 w-3.5" />
+                  Copied
+                </>
+              ) : (
+                <>
+                  <Copy className="h-3.5 w-3.5" />
+                  Copy
+                </>
+              )}
+            </Button>
+            <pre className="whitespace-pre-wrap font-mono text-sm text-zinc-200 leading-relaxed pr-16">
               {transcript}
             </pre>
           </div>
@@ -326,7 +326,7 @@ export function TranscriptPanel({
         </p>
       )}
       {summaryMarkdown && (
-        <SummaryCard markdown={summaryMarkdown} onDismiss={onSummaryDismiss} />
+        <SummaryCard markdown={summaryMarkdown} onDismiss={onSummaryDismiss} onSummaryChange={onSummaryChange} />
       )}
 
       {/* History */}
