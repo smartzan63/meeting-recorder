@@ -20,10 +20,22 @@ PROVIDER = os.getenv("PROVIDER", "gemini")
 # --- Gemini ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
+# Gemini 3 Flash is the best value for the money for meeting transcription:
+# strong diarization + reasoning at $0.50/$3.00 per 1M tokens. Pro is ~4x
+# the per-token cost; Flash-Lite is cheaper but loses notably on reasoning
+# and enrichment quality (aggregate 56 vs 66 vs Flash on Artificial Analysis).
 MODELS = {
     "gemini": {
-        "label": "Gemini 3 Flash",
+        "label": "Gemini 3 Flash (recommended)",
         "model": "gemini-3-flash-preview",
+    },
+    "gemini-3.1-pro": {
+        "label": "Gemini 3.1 Pro (highest quality, ~4x cost)",
+        "model": "gemini-3.1-pro-preview",
+    },
+    "gemini-3.1-flash-lite": {
+        "label": "Gemini 3.1 Flash-Lite (cheapest, weaker reasoning)",
+        "model": "gemini-3.1-flash-lite-preview",
     },
     "gemini-2.5-flash": {
         "label": "Gemini 2.5 Flash",

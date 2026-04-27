@@ -6,12 +6,10 @@ WebSocket clients receive JSON status messages as the pipeline progresses.
 """
 
 import asyncio
-import json
 import logging
 import re
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
 from pathlib import Path
 from typing import Set
 
@@ -38,6 +36,7 @@ def _default_model_key() -> str:
     return "azure" if config.PROVIDER == "azure" else config.DEFAULT_MODEL
 import obs
 import pipeline
+import storage
 
 logging.basicConfig(level=logging.INFO, force=True)
 logging.getLogger("obsws_python").setLevel(logging.WARNING)
@@ -308,9 +307,7 @@ async def summarize(body: dict):
             model_key = _default_model_key()
         summary = await loop.run_in_executor(None, lambda: pipeline.summarize_transcript(text, model_key))
         if name:
-            summaries_dir = Path(config.SUMMARIES_DIR)
-            summaries_dir.mkdir(parents=True, exist_ok=True)
-            (summaries_dir / f"{name}.txt").write_text(summary, encoding="utf-8")
+            storage.update_summary(name, summary)
         return {"summary": summary}
     except Exception as e:
         logger.exception("Summarization failed")
@@ -319,23 +316,17 @@ async def summarize(body: dict):
 
 @app.put("/transcripts/{transcript_id}")
 async def update_transcript(transcript_id: str, body: dict):
-    """Save speaker name mappings and/or summary. Transcript text is never modified."""
-    txt = Path(config.TRANSCRIPTS_DIR) / f"{transcript_id}.txt"
-    if not txt.exists():
+    """Save speaker name mappings and/or summary against the active version."""
+    if storage.get_recording(transcript_id) is None:
         return JSONResponse(status_code=404, content={"error": "Not found"})
     speakers = body.get("speakers")
     if speakers is not None:
         if not isinstance(speakers, dict):
             return JSONResponse(status_code=400, content={"error": "speakers must be a dict"})
-        json_path = Path(config.TRANSCRIPTS_DIR) / f"{transcript_id}.json"
-        meta = json.loads(json_path.read_text()) if json_path.exists() else {}
-        meta["speakers"] = speakers
-        json_path.write_text(json.dumps(meta), encoding="utf-8")
+        storage.update_speakers(transcript_id, speakers)
     summary = body.get("summary")
     if summary is not None:
-        summaries_dir = Path(config.SUMMARIES_DIR)
-        summaries_dir.mkdir(parents=True, exist_ok=True)
-        (summaries_dir / f"{transcript_id}.txt").write_text(summary, encoding="utf-8")
+        storage.update_summary(transcript_id, summary)
     return {"updated": transcript_id}
 
 
@@ -347,23 +338,15 @@ async def export_transcript(body: dict):
     transcript_id = (body.get("id") or "").strip()
 
     if transcript_id:
-        # Load original transcript and apply current speaker substitution server-side
-        txt_path = Path(config.TRANSCRIPTS_DIR) / f"{transcript_id}.txt"
-        if not txt_path.exists():
+        rec = storage.get_recording(transcript_id)
+        if rec is None:
             return JSONResponse(status_code=404, content={"error": f"Transcript not found: {transcript_id}"})
-        original = txt_path.read_text(encoding="utf-8")
-        json_path = Path(config.TRANSCRIPTS_DIR) / f"{transcript_id}.json"
-        meta = json.loads(json_path.read_text()) if json_path.exists() else {}
-        speakers = meta.get("speakers", {})
-        transcript = original
-        for tag, name in speakers.items():
+        transcript = rec["text"]
+        for tag, name in (rec.get("speakers") or {}).items():
             if name.strip():
                 transcript = transcript.replace(tag, name.strip())
-        # Load saved summary if not provided in body
-        if not summary:
-            summary_path = Path(config.SUMMARIES_DIR) / f"{transcript_id}.txt"
-            if summary_path.exists():
-                summary = summary_path.read_text(encoding="utf-8")
+        if not summary and rec.get("summary"):
+            summary = rec["summary"]
     else:
         transcript = (body.get("transcript") or "").strip()
 
@@ -416,53 +399,79 @@ async def test_process(body: dict):
 
 @app.get("/transcripts")
 async def list_transcripts():
-    """Return past transcripts, sorted newest first."""
-    transcripts_dir = Path(config.TRANSCRIPTS_DIR)
-    summaries_dir = Path(config.SUMMARIES_DIR)
-    if not transcripts_dir.exists():
-        return []
-    results = []
-    for json_path in transcripts_dir.glob("*.json"):
-        stem = json_path.stem
-        txt_path = transcripts_dir / f"{stem}.txt"
-        if not txt_path.exists() or txt_path.stat().st_size == 0:
-            continue
-        meta = json.loads(json_path.read_text())
-        has_summary = (summaries_dir / f"{stem}.txt").exists()
-        results.append({"id": stem, **meta, "has_summary": has_summary})
-    results.sort(key=lambda x: x["created_at"], reverse=True)
-    return results
+    return storage.list_recordings()
 
 
 @app.get("/transcripts/{transcript_id}")
 async def get_transcript(transcript_id: str):
-    transcripts_dir = Path(config.TRANSCRIPTS_DIR)
-    txt_path = transcripts_dir / f"{transcript_id}.txt"
-    if not txt_path.exists():
+    rec = storage.get_recording(transcript_id)
+    if rec is None:
         return JSONResponse(status_code=404, content={"error": "Not found"})
-    text = txt_path.read_text(encoding="utf-8")
-    json_path = transcripts_dir / f"{transcript_id}.json"
-    meta = json.loads(json_path.read_text()) if json_path.exists() else {}
-    result: dict = {"text": text, "meta": meta}
-    if "speakers" in meta:
-        result["speakers"] = meta["speakers"]
-    if "speakers_list" in meta:
-        result["speakers_list"] = meta["speakers_list"]
-    summary_path = Path(config.SUMMARIES_DIR) / f"{transcript_id}.txt"
-    if summary_path.exists():
-        result["summary"] = summary_path.read_text(encoding="utf-8")
+    result: dict = {
+        "text": rec["text"],
+        "meta": {
+            "source": rec.get("source", ""),
+            "model": rec.get("model", ""),
+            "created_at": rec.get("created_at", ""),
+        },
+        "active": rec["active"],
+        "versions": rec["versions"],
+    }
+    if rec.get("speakers"):
+        result["speakers"] = rec["speakers"]
+    if rec.get("speakers_list"):
+        result["speakers_list"] = rec["speakers_list"]
+    if rec.get("summary"):
+        result["summary"] = rec["summary"]
     return result
+
+
+@app.post("/transcripts/{transcript_id}/active")
+async def set_active_version(transcript_id: str, body: dict):
+    """Switch which version is active (the one returned by GET /transcripts/{id})."""
+    version_id = (body.get("version") or "").strip()
+    if not version_id:
+        return JSONResponse(status_code=400, content={"error": "version is required"})
+    if not storage.set_active(transcript_id, version_id):
+        return JSONResponse(status_code=404, content={"error": "Recording or version not found"})
+    return {"id": transcript_id, "active": version_id}
+
+
+@app.post("/transcripts/{transcript_id}/reprocess")
+async def reprocess_transcript(transcript_id: str, body: dict):
+    """Re-run transcription on the saved wav as a new version.
+
+    Adds a version to the recording instead of overwriting; the new version
+    becomes active. Switch back via POST /transcripts/{id}/active.
+    """
+    if _state == "transcribing":
+        return JSONResponse(status_code=409, content={"error": "Already processing — wait for it to finish"})
+
+    wav_path = Path(config.RECORDINGS_DIR) / f"{transcript_id}.wav"
+    if not wav_path.exists():
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"Original audio not found: {wav_path.name}"},
+        )
+
+    model_key = (body.get("model") or "").strip()
+    if not _valid_model_key(model_key):
+        return JSONResponse(status_code=400, content={"error": f"Unknown model: {model_key}"})
+
+    task = body.get("task", "transcribe")
+    if task not in ("transcribe", "translate"):
+        task = "transcribe"
+
+    await _send_status("transcribing", f"Reprocessing with {_model_label(model_key)}...")
+    asyncio.create_task(_run_pipeline(str(wav_path), transcript_id, model_key, task))
+    return {"state": "transcribing", "id": transcript_id}
 
 
 @app.delete("/transcripts/{transcript_id}")
 async def delete_transcript(transcript_id: str):
-    transcripts_dir = Path(config.TRANSCRIPTS_DIR)
-    txt_path = transcripts_dir / f"{transcript_id}.txt"
-    if not txt_path.exists():
+    if storage.get_recording(transcript_id) is None:
         return JSONResponse(status_code=404, content={"error": "Not found"})
-    txt_path.unlink(missing_ok=True)
-    (transcripts_dir / f"{transcript_id}.json").unlink(missing_ok=True)
-    (Path(config.SUMMARIES_DIR) / f"{transcript_id}.txt").unlink(missing_ok=True)
+    storage.delete_recording(transcript_id)
     (Path(config.RECORDINGS_DIR) / f"{transcript_id}.wav").unlink(missing_ok=True)
     return {"deleted": transcript_id}
 
@@ -492,15 +501,8 @@ async def websocket_endpoint(ws: WebSocket):
 async def _run_pipeline(audio_path: str, recording_name: str, model_key: str = config.DEFAULT_MODEL, task: str = "transcribe", save_wav: bool = False) -> None:
     logger.info("Pipeline started: source=%s model=%s task=%s", audio_path, model_key, task)
 
-    # Write metadata alongside the transcript
     transcripts_dir = Path(config.TRANSCRIPTS_DIR)
     transcripts_dir.mkdir(parents=True, exist_ok=True)
-    meta = {
-        "source": Path(audio_path).name,
-        "model": _model_label(model_key),
-        "created_at": datetime.now().isoformat(),
-    }
-    (transcripts_dir / f"{recording_name}.json").write_text(json.dumps(meta))
 
     async def on_status(message: str) -> None:
         await _broadcast({"type": "status", "state": "transcribing", "message": message})
@@ -547,13 +549,34 @@ async def _run_pipeline(audio_path: str, recording_name: str, model_key: str = c
 
         model_label = _model_label(model_key)
 
-        # Save the full speaker list to meta so the UI can always show all SPEAKER_XX inputs
+        # Pipeline writes a flat transcript file alongside its old contract; remove it
+        # before recording the version, otherwise migrate_legacy would turn it into a
+        # spurious extra version with an empty model field.
+        (transcripts_dir / f"{recording_name}.txt").unlink(missing_ok=True)
+        (transcripts_dir / f"{recording_name}.json").unlink(missing_ok=True)
+
+        storage.add_version(
+            recording_name,
+            transcript,
+            model_label,
+            source=Path(audio_path).name,
+        )
+
         speakers_list = sorted(set(re.findall(r'SPEAKER_\d+', transcript)))
-        meta['speakers_list'] = speakers_list
-        (transcripts_dir / f"{recording_name}.json").write_text(json.dumps(meta))
+        rec = storage.get_recording(recording_name)
+        active_version = rec["active"] if rec else None
+        versions = rec["versions"] if rec else []
 
         await _send_status("done", "Transcription complete")
-        await _broadcast({"type": "transcript", "id": recording_name, "text": transcript, "model": model_label, "speakers_list": speakers_list})
+        await _broadcast({
+            "type": "transcript",
+            "id": recording_name,
+            "text": transcript,
+            "model": model_label,
+            "speakers_list": speakers_list,
+            "active": active_version,
+            "versions": versions,
+        })
 
     except Exception as e:
         logger.exception("Pipeline failed for recording %s", recording_name)

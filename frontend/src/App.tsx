@@ -38,6 +38,8 @@ type AppState = {
   currentRecordingName: string | null
   integrations: Integrations
   obsConnected: boolean | null
+  versions: Array<{ id: string; model: string; created_at: string; has_summary?: boolean }>
+  activeVersion: string | null
 }
 
 type Model = {
@@ -73,6 +75,7 @@ type Action =
   | { type: 'SET_RECORDING_NAME'; name: string | null }
   | { type: 'SET_INTEGRATIONS'; integrations: Integrations }
   | { type: 'SET_OBS_CONNECTED'; connected: boolean }
+  | { type: 'SET_VERSIONS'; versions: AppState['versions']; active: string | null }
 
 // --- Reducer ---
 
@@ -99,6 +102,8 @@ const initialState: AppState = {
   currentRecordingName: null,
   integrations: { confluence: false, notion: false },
   obsConnected: null,
+  versions: [],
+  activeVersion: null,
 }
 
 function reducer(state: AppState, action: Action): AppState {
@@ -202,6 +207,8 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, integrations: action.integrations }
     case 'SET_OBS_CONNECTED':
       return { ...state, obsConnected: action.connected }
+    case 'SET_VERSIONS':
+      return { ...state, versions: action.versions, activeVersion: action.active }
     default:
       return state
   }
@@ -228,7 +235,7 @@ async function fetchHistory() {
   return res.json() as Promise<Array<{ id: string; source: string; model: string; created_at: string; has_summary?: boolean }>>
 }
 
-async function fetchTranscript(id: string): Promise<{ text: string; meta: { source: string; model: string; created_at: string }; summary?: string; speakers?: Record<string, string>; speakers_list?: string[] }> {
+async function fetchTranscript(id: string): Promise<{ text: string; meta: { source: string; model: string; created_at: string }; summary?: string; speakers?: Record<string, string>; speakers_list?: string[]; active?: string; versions?: Array<{ id: string; model: string; created_at: string; has_summary?: boolean }> }> {
   const res = await fetch(`/transcripts/${id}`)
   if (!res.ok) throw new Error('Failed to load transcript')
   return res.json()
@@ -320,6 +327,15 @@ export default function App() {
       if (Array.isArray(lastMessage.speakers_list)) {
         dispatch({ type: 'SET_SPEAKERS_LIST', list: lastMessage.speakers_list })
       }
+      if (Array.isArray(lastMessage.versions)) {
+        dispatch({
+          type: 'SET_VERSIONS',
+          versions: lastMessage.versions,
+          active: lastMessage.active ?? null,
+        })
+      }
+      // Reprocess clears the displayed summary; new transcript starts without one
+      dispatch({ type: 'DISMISS_SUMMARY' })
       // Refresh history
       void fetchHistory().then((items) => dispatch({ type: 'SET_HISTORY', items }))
     }
@@ -477,24 +493,72 @@ export default function App() {
     dispatch({ type: 'SET_HISTORY', items })
   }, [])
 
-  const handleLoadHistory = useCallback(async (id: string, _source: string) => {
+  const handleReprocess = useCallback(async (modelKey: string) => {
+    if (!state.currentRecordingName) return
     try {
-      const data = await fetchTranscript(id)
-      dispatch({ type: 'SET_TRANSCRIPT', text: data.text, model: data.meta.model })
-      dispatch({ type: 'SET_RECORDING_NAME', name: id })
-      if (data.speakers_list && data.speakers_list.length > 0) {
-        dispatch({ type: 'SET_SPEAKERS_LIST', list: data.speakers_list })
+      const res = await fetch(`/transcripts/${state.currentRecordingName}/reprocess`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: modelKey }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
+        throw new Error(err.error || 'Reprocess failed')
       }
-      if (data.speakers && Object.keys(data.speakers).length > 0) {
-        dispatch({ type: 'SET_ENRICHED_SPEAKERS', speakers: data.speakers })
-      }
-      if (data.summary) {
-        dispatch({ type: 'SET_SUMMARY', markdown: data.summary })
-      }
+      // Pipeline runs in background — WebSocket status messages will drive the UI.
+      // Clear the currently shown summary so it doesn't linger against a new transcript.
+      dispatch({ type: 'DISMISS_SUMMARY' })
     } catch (err) {
       dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
     }
+  }, [state.currentRecordingName])
+
+  const applyTranscriptData = useCallback((id: string, data: Awaited<ReturnType<typeof fetchTranscript>>) => {
+    dispatch({ type: 'SET_TRANSCRIPT', text: data.text, model: data.meta.model })
+    dispatch({ type: 'SET_RECORDING_NAME', name: id })
+    dispatch({ type: 'SET_SPEAKERS_LIST', list: data.speakers_list ?? [] })
+    dispatch({ type: 'SET_ENRICHED_SPEAKERS', speakers: data.speakers ?? {} })
+    dispatch({
+      type: 'SET_VERSIONS',
+      versions: data.versions ?? [],
+      active: data.active ?? null,
+    })
+    if (data.summary) {
+      dispatch({ type: 'SET_SUMMARY', markdown: data.summary })
+    } else {
+      dispatch({ type: 'DISMISS_SUMMARY' })
+    }
   }, [])
+
+  const handleLoadHistory = useCallback(async (id: string, _source: string) => {
+    try {
+      const data = await fetchTranscript(id)
+      applyTranscriptData(id, data)
+    } catch (err) {
+      dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
+    }
+  }, [applyTranscriptData])
+
+  const handleSwitchVersion = useCallback(async (versionId: string) => {
+    if (!state.currentRecordingName) return
+    try {
+      const res = await fetch(`/transcripts/${state.currentRecordingName}/active`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ version: versionId }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
+        throw new Error(err.error || 'Switch failed')
+      }
+      const data = await fetchTranscript(state.currentRecordingName)
+      applyTranscriptData(state.currentRecordingName, data)
+      const items = await fetchHistory()
+      dispatch({ type: 'SET_HISTORY', items })
+    } catch (err) {
+      dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
+    }
+  }, [state.currentRecordingName, applyTranscriptData])
 
   const handleTranscriptChange = useCallback((text: string) => {
     dispatch({ type: 'UPDATE_TRANSCRIPT', text })
@@ -659,6 +723,11 @@ export default function App() {
             onExport={handleExport}
             onDownload={handleDownload}
             integrations={state.integrations}
+            models={models}
+            onReprocess={handleReprocess}
+            versions={state.versions}
+            activeVersion={state.activeVersion}
+            onSwitchVersion={handleSwitchVersion}
           />
         </main>
       </div>

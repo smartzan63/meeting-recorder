@@ -1,8 +1,16 @@
 import { useMemo, useState, useEffect } from 'react'
-import { FileAudio, Loader2, Copy, Check, Download, Link, FileText } from 'lucide-react'
+import { FileAudio, Loader2, Copy, Check, Download, Link, FileText, RefreshCw } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog'
 import { SummaryCard } from './SummaryCard'
 import { HistoryPanel } from './HistoryPanel'
 
@@ -37,6 +45,11 @@ type TranscriptPanelProps = {
   onExport: (destination: 'confluence' | 'notion') => Promise<void>
   onDownload: () => void
   integrations: { confluence: boolean; notion: boolean }
+  models: { key: string; label: string; default?: boolean }[]
+  onReprocess?: (modelKey: string) => Promise<void>
+  versions: Array<{ id: string; model: string; created_at: string; has_summary?: boolean }>
+  activeVersion: string | null
+  onSwitchVersion?: (versionId: string) => Promise<void>
 }
 
 const SPEAKER_COLORS = [
@@ -75,9 +88,16 @@ export function TranscriptPanel({
   onExport,
   onDownload,
   integrations,
+  models,
+  onReprocess,
+  versions,
+  activeVersion,
+  onSwitchVersion,
 }: TranscriptPanelProps) {
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({})
   const [copied, setCopied] = useState(false)
+  const [reprocessOpen, setReprocessOpen] = useState(false)
+  const [reprocessModel, setReprocessModel] = useState<string>('')
   const [summaryIsStale, setSummaryIsStale] = useState(false)
 
   // Prefer the canonical list stored at transcription time; fall back to scanning the text
@@ -185,11 +205,53 @@ export function TranscriptPanel({
             <span className="text-xs font-medium uppercase tracking-widest text-zinc-400">
               Transcript
             </span>
-            {transcriptModel && (
-              <Badge variant="outline" className="text-xs text-zinc-400 border-zinc-700">
-                {transcriptModel}
-              </Badge>
-            )}
+            <div className="flex items-center gap-2">
+              {versions.length > 1 && onSwitchVersion ? (
+                <Select
+                  value={activeVersion ?? ''}
+                  onValueChange={(v) => void onSwitchVersion(v)}
+                  disabled={isLoading}
+                >
+                  <SelectTrigger className="h-7 px-2 text-xs bg-zinc-900 border-zinc-700 text-zinc-300 gap-1.5 [&>svg]:opacity-60">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="bg-zinc-900 border-zinc-700">
+                    {versions.map((v) => (
+                      <SelectItem
+                        key={v.id}
+                        value={v.id}
+                        className="text-zinc-200 focus:bg-zinc-800 focus:text-zinc-100 text-xs"
+                      >
+                        {v.model || 'Unknown model'}{' '}
+                        <span className="text-zinc-500">
+                          · {new Date(v.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : transcriptModel ? (
+                <Badge variant="outline" className="text-xs text-zinc-400 border-zinc-700">
+                  {transcriptModel}
+                </Badge>
+              ) : null}
+              {currentRecordingName && onReprocess && models.length > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 gap-1"
+                  onClick={() => {
+                    const def = models.find((m) => m.default) ?? models[0]
+                    setReprocessModel(def?.key ?? '')
+                    setReprocessOpen(true)
+                  }}
+                  disabled={isLoading}
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Reprocess
+                </Button>
+              )}
+            </div>
           </div>
 
           {/* Speaker editor */}
@@ -331,6 +393,60 @@ export function TranscriptPanel({
 
       {/* History */}
       <HistoryPanel items={history} onLoad={onLoadHistory} onDelete={onDeleteHistory} />
+
+      {/* Reprocess dialog */}
+      <Dialog open={reprocessOpen} onOpenChange={setReprocessOpen}>
+        <DialogContent className="bg-zinc-900 border-zinc-700 text-zinc-100">
+          <DialogHeader>
+            <DialogTitle>Reprocess transcript</DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col gap-3">
+            <p className="text-sm text-zinc-400">
+              Re-runs transcription on the original audio with a different model. The
+              existing transcript and saved summary will be overwritten.
+            </p>
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs text-zinc-500">Model</span>
+              <Select value={reprocessModel} onValueChange={setReprocessModel}>
+                <SelectTrigger className="bg-zinc-900 border-zinc-700 text-zinc-200">
+                  <SelectValue placeholder="Select model" />
+                </SelectTrigger>
+                <SelectContent className="bg-zinc-900 border-zinc-700">
+                  {models.map((m) => (
+                    <SelectItem
+                      key={m.key}
+                      value={m.key}
+                      className="text-zinc-200 focus:bg-zinc-800 focus:text-zinc-100"
+                    >
+                      {m.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setReprocessOpen(false)}
+              className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (!onReprocess || !reprocessModel) return
+                setReprocessOpen(false)
+                void onReprocess(reprocessModel)
+              }}
+              disabled={!reprocessModel}
+              className="bg-zinc-100 text-zinc-900 hover:bg-zinc-200 border-0"
+            >
+              Reprocess
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

@@ -10,6 +10,8 @@ export type WsMessage = {
   id?: string
   speakers_list?: string[]
   connected?: boolean
+  active?: string
+  versions?: Array<{ id: string; model: string; created_at: string; has_summary?: boolean }>
 }
 
 export function useWebSocket(): { lastMessage: WsMessage | null } {
