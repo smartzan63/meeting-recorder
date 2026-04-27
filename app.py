@@ -50,6 +50,7 @@ _state: str = "idle"
 _ws_clients: Set[WebSocket] = set()
 _stopped_path: str | None = None  # OBS output path held between stop and user naming
 _recording_started_at: float | None = None
+_obs_connected: bool = False
 
 
 # ── WebSocket helpers ─────────────────────────────────────────────────────────
@@ -73,17 +74,41 @@ async def _send_status(state: str, message: str = "") -> None:
     await _broadcast(payload)
 
 
+# ── OBS background reconnect ──────────────────────────────────────────────────
+
+async def _obs_reconnect_loop() -> None:
+    global _obs_connected
+    while True:
+        await asyncio.sleep(10)
+        if not obs.is_connected():
+            try:
+                obs.try_reconnect()
+                logger.info("OBS reconnected")
+                if not _obs_connected:
+                    _obs_connected = True
+                    await _broadcast({"type": "obs_status", "connected": True})
+            except Exception as e:
+                logger.debug("OBS reconnect attempt failed: %s", e)
+                if _obs_connected:
+                    _obs_connected = False
+                    await _broadcast({"type": "obs_status", "connected": False})
+
+
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Connect to OBS on startup; log a warning if it is not running
+    global _obs_connected
     try:
         obs.connect()
+        _obs_connected = True
     except Exception as e:
         logger.warning("Could not connect to OBS on startup: %s", e)
+        _obs_connected = False
 
+    reconnect_task = asyncio.create_task(_obs_reconnect_loop())
     yield
+    reconnect_task.cancel()
     obs.disconnect()
 
 
@@ -97,6 +122,33 @@ async def reset_state():
     """Reset state to idle — use to recover from a stuck error state."""
     await _send_status("idle")
     return {"state": "idle"}
+
+
+@app.get("/obs/status")
+async def obs_status():
+    global _obs_connected
+    loop = asyncio.get_running_loop()
+    connected = await loop.run_in_executor(None, obs.is_connected)
+    if connected != _obs_connected:
+        _obs_connected = connected
+        await _broadcast({"type": "obs_status", "connected": connected})
+    return {"connected": connected}
+
+
+@app.post("/obs/reconnect")
+async def obs_reconnect():
+    global _obs_connected
+    try:
+        obs.try_reconnect()
+        if not _obs_connected:
+            _obs_connected = True
+            await _broadcast({"type": "obs_status", "connected": True})
+        return {"connected": True}
+    except Exception as e:
+        if _obs_connected:
+            _obs_connected = False
+            await _broadcast({"type": "obs_status", "connected": False})
+        return JSONResponse(status_code=503, content={"connected": False, "error": str(e)})
 
 
 @app.get("/integrations")
@@ -124,11 +176,13 @@ async def models():
 
 @app.post("/recording/start")
 async def recording_start():
-    global _recording_started_at
+    global _recording_started_at, _obs_connected
     try:
         obs.start_recording()
     except RuntimeError as e:
-        # OBS not connected
+        if _obs_connected:
+            _obs_connected = False
+            await _broadcast({"type": "obs_status", "connected": False})
         return JSONResponse(status_code=503, content={"error": str(e)})
     except Exception as e:
         logger.exception("Failed to start recording")
@@ -141,10 +195,13 @@ async def recording_start():
 
 @app.post("/recording/stop")
 async def recording_stop():
-    global _stopped_path, _recording_started_at
+    global _stopped_path, _recording_started_at, _obs_connected
     try:
         audio_path = obs.stop_recording()
     except RuntimeError as e:
+        if _obs_connected:
+            _obs_connected = False
+            await _broadcast({"type": "obs_status", "connected": False})
         return JSONResponse(status_code=503, content={"error": str(e)})
     except Exception as e:
         logger.exception("Failed to stop recording")
@@ -419,6 +476,7 @@ async def websocket_endpoint(ws: WebSocket):
     if _state == "recording" and _recording_started_at is not None:
         init_payload["started_at"] = _recording_started_at
     await ws.send_json(init_payload)
+    await ws.send_json({"type": "obs_status", "connected": _obs_connected})
     try:
         while True:
             # Keep the connection alive; we don't expect messages from the client

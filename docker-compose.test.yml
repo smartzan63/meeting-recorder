@@ -5,6 +5,7 @@
 
 services:
   mock-obs:
+    container_name: meeting-recorder-test-obs
     build:
       context: .
       dockerfile: Dockerfile.mock-obs
@@ -17,6 +18,7 @@ services:
       - recordings:/app/recordings
 
   app:
+    container_name: meeting-recorder-test
     build:
       context: .
     ports:

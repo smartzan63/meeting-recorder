@@ -32,18 +32,47 @@ def disconnect() -> None:
         _client = None
 
 
-def _require_client() -> obs.ReqClient:
+def is_connected() -> bool:
+    """Actively probe OBS — returns False if the socket is dead."""
     if _client is None:
-        raise RuntimeError("Not connected to OBS")
-    return _client
+        return False
+    try:
+        _client.get_version()
+        return True
+    except Exception:
+        disconnect()
+        return False
+
+
+def try_reconnect() -> None:
+    disconnect()
+    connect()
+
+
+def _require_client() -> obs.ReqClient:
+    global _client
+    if _client is None:
+        connect()  # raises on failure
+    return _client  # type: ignore[return-value]
+
+
+def _clear_on_error(e: Exception) -> None:
+    global _client
+    _client = None
+    raise RuntimeError(f"OBS connection lost: {e}") from e
 
 
 def start_recording() -> None:
-    _require_client().start_record()
+    try:
+        _require_client().start_record()
+    except RuntimeError:
+        raise
+    except Exception as e:
+        _clear_on_error(e)
     logger.info("OBS recording started")
 
 
-def _wait_for_file(path: str, timeout: float = 30.0, stable_secs: float = 0.5) -> None:
+def _wait_for_file(path: str, timeout: float = 120.0, stable_secs: float = 0.5) -> None:
     """Block until path exists on disk and its size has stopped growing.
 
     OBS sends output_path in the StopRecord response before it finishes
@@ -68,8 +97,14 @@ def stop_recording() -> str:
     outputPath field (snake_cased to output_path) contains the exact
     filesystem path OBS wrote the file to.
     """
-    client = _require_client()
-    resp = client.stop_record()
+    try:
+        resp = _require_client().stop_record()
+    except RuntimeError:
+        raise
+    except Exception as e:
+        _clear_on_error(e)
+        raise  # unreachable; satisfies type checker
+
     obs_path: str = resp.output_path
     logger.info("OBS recording stopped, file reported at: %s", obs_path)
 

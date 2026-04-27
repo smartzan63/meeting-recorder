@@ -1,5 +1,6 @@
 services:
   meeting-recorder:
+    container_name: meeting-recorder
     build: .
     ports:
       - "8080:8080"

@@ -37,6 +37,7 @@ type AppState = {
   lastExportUrl: string | null
   currentRecordingName: string | null
   integrations: Integrations
+  obsConnected: boolean | null
 }
 
 type Model = {
@@ -71,6 +72,7 @@ type Action =
   | { type: 'SET_EXPORT_RESULT'; url: string | null }
   | { type: 'SET_RECORDING_NAME'; name: string | null }
   | { type: 'SET_INTEGRATIONS'; integrations: Integrations }
+  | { type: 'SET_OBS_CONNECTED'; connected: boolean }
 
 // --- Reducer ---
 
@@ -96,6 +98,7 @@ const initialState: AppState = {
   lastExportUrl: null,
   currentRecordingName: null,
   integrations: { confluence: false, notion: false },
+  obsConnected: null,
 }
 
 function reducer(state: AppState, action: Action): AppState {
@@ -197,6 +200,8 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, currentRecordingName: action.name }
     case 'SET_INTEGRATIONS':
       return { ...state, integrations: action.integrations }
+    case 'SET_OBS_CONNECTED':
+      return { ...state, obsConnected: action.connected }
     default:
       return state
   }
@@ -301,6 +306,8 @@ export default function App() {
       } else if (serverState === 'idle' && state.status === 'transcribing') {
         dispatch({ type: 'SET_STATUS', status: 'idle' })
       }
+    } else if (lastMessage.type === 'obs_status') {
+      dispatch({ type: 'SET_OBS_CONNECTED', connected: lastMessage.connected ?? false })
     } else if (lastMessage.type === 'transcript') {
       dispatch({
         type: 'SET_TRANSCRIPT',
@@ -318,11 +325,14 @@ export default function App() {
     }
   }, [lastMessage, state.status])
 
-  // Load history and integrations on mount
+  // Load history, integrations, and OBS status on mount
   useEffect(() => {
     void fetchHistory().then((items) => dispatch({ type: 'SET_HISTORY', items }))
     void fetch('/integrations').then((r) => r.ok ? r.json() : null).then((data) => {
       if (data) dispatch({ type: 'SET_INTEGRATIONS', integrations: data })
+    })
+    void fetch('/obs/status').then((r) => r.ok ? r.json() : null).then((data) => {
+      if (data) dispatch({ type: 'SET_OBS_CONNECTED', connected: data.connected })
     })
   }, [])
 
@@ -535,12 +545,20 @@ export default function App() {
     }
   }, [state.integrations.test_file_path, state.selectedModel])
 
+  const handleObsReconnect = useCallback(async () => {
+    try {
+      await apiPost('/obs/reconnect')
+    } catch {
+      // WS broadcast will update the status regardless
+    }
+  }, [])
+
   const handleDownload = useCallback(() => {
     const blob = new Blob([state.transcript], { type: 'text/plain' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = 'transcript.txt'
+    a.download = `${state.currentRecordingName ?? 'transcript'}.txt`
     a.click()
     URL.revokeObjectURL(url)
   }, [state.transcript])
@@ -557,8 +575,27 @@ export default function App() {
         <h1 className="text-lg font-medium tracking-wide text-muted-foreground">
           Meeting Recorder
         </h1>
-        <Badge variant="outline">{providerLabel}</Badge>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5" title={state.obsConnected === null ? 'OBS: connecting…' : state.obsConnected ? 'OBS: connected' : 'OBS: not connected'}>
+            <span className={`h-2 w-2 rounded-full ${state.obsConnected === null ? 'bg-zinc-500' : state.obsConnected ? 'bg-green-500' : 'bg-red-500'}`} />
+            <span className="text-xs text-zinc-500">OBS</span>
+          </div>
+          <Badge variant="outline">{providerLabel}</Badge>
+        </div>
       </header>
+
+      {/* OBS disconnected banner */}
+      {state.obsConnected === false && (
+        <div className="flex items-center justify-between gap-4 px-6 py-2.5 bg-amber-950/60 border-b border-amber-800/50 text-amber-300 text-sm shrink-0">
+          <span>OBS is not connected — recording is unavailable.</span>
+          <button
+            onClick={() => void handleObsReconnect()}
+            className="shrink-0 rounded px-3 py-1 text-xs font-medium bg-amber-800/50 hover:bg-amber-700/60 border border-amber-700/50 transition-colors"
+          >
+            Reconnect
+          </button>
+        </div>
+      )}
 
       {/* Two-column layout */}
       <div className="flex flex-col md:flex-row flex-1 min-h-0">

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 export type WsMessage = {
-  type: 'status' | 'transcript'
+  type: 'status' | 'transcript' | 'obs_status'
   state?: string
   message?: string
   started_at?: number
@@ -9,6 +9,7 @@ export type WsMessage = {
   model?: string
   id?: string
   speakers_list?: string[]
+  connected?: boolean
 }
 
 export function useWebSocket(): { lastMessage: WsMessage | null } {
