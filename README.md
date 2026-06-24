@@ -82,9 +82,14 @@ Requires a [Gemini API key](https://aistudio.google.com/apikey). Free tier avail
 
 Transcription, diarization, speaker name enrichment, and summarization all use Gemini.
 
-Available models (set via the UI dropdown at runtime — all operations use the selected model):
-- `gemini-3-flash-preview` — default; low free-tier quota and subject to demand spikes
-- `gemini-2.5-flash` — recommended; higher quota and more stable availability
+Available models (set via the UI dropdown at runtime, which shows each model's per-1M-token audio-input and output price — all operations use the selected model):
+- `gemini-3-flash-preview` — default; best value for diarization quality
+- `gemini-2.5-flash` — cheaper, stable availability
+- `gemini-3.1-flash-lite` — cheapest
+- `gemini-3.5-flash` — newest, roughly 3x the output cost of Gemini 3 Flash
+- `gemini-3.1-pro-preview`, `gemini-2.5-pro` — highest quality, higher cost
+
+The list and its prices are hand-maintained in `config.py` (the Gemini API does not expose pricing).
 
 ### Azure
 
@@ -114,7 +119,8 @@ Copy `.env.example` to `.env`. The file is never committed (`.gitignore`).
 | `AZURE_OPENAI_KEY` | — | Azure OpenAI key |
 | `AZURE_OPENAI_DEPLOYMENT` | `gpt-5.2` | Azure OpenAI deployment name |
 | `RECORDINGS_DIR` | `./data/audio` | Where audio files are saved |
-| `TRANSCRIPTS_DIR` | `./data/transcripts` | Where transcript `.txt` and `.json` files are saved |
+| `TRANSCRIPTS_HOST_DIR` | `./data/transcripts` | Host directory bind-mounted for transcripts. Point it at any host path to store transcripts outside the project. On Windows use forward slashes and no quotes, e.g. `C:/Users/you/transcripts` |
+| `TRANSCRIPTS_DIR` | `/app/external-transcripts` | In-container path the app writes transcripts to (matches the bind-mount target). Leave as-is on every OS |
 | `SUMMARIES_DIR` | `./data/summaries` | Where summary files are auto-saved |
 | `CONFLUENCE_URL` | — | Confluence base URL (e.g. `https://yourcompany.atlassian.net`) |
 | `CONFLUENCE_EMAIL` | — | Atlassian account email |
@@ -156,11 +162,13 @@ OBS (host) ──websocket──▶ app.py (FastAPI + WebSocket)
                       summarization)
             └───────────────────┼───────────────────┘
                                 │
-              data/transcripts/{name}.txt + .json
-              data/summaries/{name}.txt
+         transcripts: {id}/index.json + {version}.txt + .summary.txt
+         (host location set by TRANSCRIPTS_HOST_DIR)
                                 │
                     WebSocket ──▶ browser UI (React)
 ```
+
+Transcripts are stored per recording in a versioned directory, so re-transcribing a recording with a different model adds a new version rather than overwriting. Timestamps are stored in UTC and rendered in the browser's local timezone in 24-hour format.
 
 | Component | Tool |
 |---|---|
