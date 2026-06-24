@@ -13,11 +13,36 @@ import json
 import re
 import shutil
 import time
-from datetime import datetime
+import unicodedata
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import config
+
+# Device names reserved on Windows/NTFS — illegal even as a bare name.
+_WIN_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {
+    f"{p}{i}" for p in ("COM", "LPT") for i in range(1, 10)
+}
+
+
+def sanitize_id(name: str) -> str:
+    """Make a user-supplied name safe as a single path segment on any host OS.
+
+    Recording names become directory/file names that land on the host
+    filesystem through a bind mount, which may be NTFS. Strip path separators
+    (no traversal), replace characters illegal on Windows, drop trailing dots/
+    spaces, avoid reserved device names, and cap the length.
+    """
+    name = unicodedata.normalize("NFC", name or "")
+    name = name.replace("\\", "/").split("/")[-1]          # basename only
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)     # NTFS-illegal + control chars
+    name = name.strip(" .")                                # NTFS forbids trailing dot/space
+    if not name or name in {".", ".."}:
+        name = "recording"
+    if name.upper() in _WIN_RESERVED:
+        name = f"_{name}"
+    return name[:120]
 
 
 def _rec_dir(rec_id: str) -> Path:
@@ -88,7 +113,7 @@ def migrate_legacy(rec_id: str) -> None:
     version = {
         "id": version_id,
         "model": meta.get("model", ""),
-        "created_at": meta.get("created_at", datetime.now().isoformat()),
+        "created_at": meta.get("created_at", datetime.now(timezone.utc).isoformat()),
         "speakers": meta.get("speakers", {}),
         "speakers_list": meta.get("speakers_list", []),
         "has_summary": False,
@@ -190,7 +215,7 @@ def add_version(rec_id: str, text: str, model_label: str, source: str) -> str:
     version = {
         "id": version_id,
         "model": model_label,
-        "created_at": datetime.now().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "speakers": {},
         "speakers_list": speakers_list,
         "has_summary": False,

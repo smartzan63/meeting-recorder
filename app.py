@@ -168,6 +168,9 @@ async def models():
             "key": key,
             "label": cfg["label"],
             "default": key == config.DEFAULT_MODEL,
+            "input_per_1m": cfg.get("input_per_1m"),
+            "audio_per_1m": cfg.get("audio_per_1m"),
+            "output_per_1m": cfg.get("output_per_1m"),
         }
         for key, cfg in config.MODELS.items()
     ]
@@ -218,9 +221,10 @@ async def recording_save(body: dict):
     global _stopped_path
     if not _stopped_path:
         return JSONResponse(status_code=400, content={"error": "No stopped recording"})
-    name = (body.get("name") or "").strip()
-    if not name:
+    raw_name = (body.get("name") or "").strip()
+    if not raw_name:
         return JSONResponse(status_code=400, content={"error": "Name is required"})
+    name = storage.sanitize_id(raw_name)
 
     recordings_dir = Path(config.RECORDINGS_DIR)
     recordings_dir.mkdir(exist_ok=True)
@@ -262,14 +266,15 @@ async def upload_file(
     recordings_dir = Path(config.RECORDINGS_DIR)
     recordings_dir.mkdir(parents=True, exist_ok=True)
 
-    safe_name = (file.filename or "upload").replace(" ", "_")
+    orig = Path(file.filename or "upload")
+    recording_name = storage.sanitize_id(orig.stem)
+    safe_name = f"{recording_name}{orig.suffix.lower()}"
     dest = recordings_dir / safe_name
     content = await file.read()
     dest.write_bytes(content)
 
-    recording_name = Path(safe_name).stem
-    # Avoid clobbering an existing transcript
-    if (Path(config.TRANSCRIPTS_DIR) / f"{recording_name}.txt").exists():
+    # Avoid clobbering an existing recording (storage is versioned dirs now).
+    if storage.get_recording(recording_name) is not None:
         recording_name = f"{recording_name}_{int(time.time())}"
 
     await _send_status("transcribing", "Processing uploaded file...")
@@ -391,7 +396,7 @@ async def test_process(body: dict):
     task = body.get("task", "transcribe")
     if task not in ("transcribe", "translate"):
         task = "transcribe"
-    recording_name = Path(audio_path).stem
+    recording_name = storage.sanitize_id(Path(audio_path).stem)
     await _send_status("transcribing", "Processing recording...")
     asyncio.create_task(_run_pipeline(audio_path, recording_name, model_key, task))
     return {"state": "transcribing", "id": recording_name}

@@ -8,10 +8,20 @@ services:
       - .env
     environment:
       OBS_HOST: "host.docker.internal"
+      # Container path the app writes transcripts to (matches the bind target
+      # below). Default makes the external mount active without needing .env.
+      TRANSCRIPTS_DIR: ${TRANSCRIPTS_DIR:-/app/external-transcripts}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
+      # Optional: store transcripts on a host path outside the project. Set
+      # TRANSCRIPTS_HOST_DIR to that host path; defaults to the in-project dir.
+      # Long syntax is used so a Windows drive-letter path (e.g.
+      # C:/Users/you/transcripts) is not misread at the ":" volume separator.
+      - type: bind
+        source: ${TRANSCRIPTS_HOST_DIR:-./data/transcripts}
+        target: /app/external-transcripts
       - ./app.py:/app/app.py:ro
       - ./pipeline.py:/app/pipeline.py:ro
       - ./config.py:/app/config.py:ro

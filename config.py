@@ -20,26 +20,57 @@ PROVIDER = os.getenv("PROVIDER", "gemini")
 # --- Gemini ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-# Gemini 3 Flash is the best value for the money for meeting transcription:
-# strong diarization + reasoning at $0.50/$3.00 per 1M tokens. Pro is ~4x
-# the per-token cost; Flash-Lite is cheaper but loses notably on reasoning
-# and enrichment quality (aggregate 56 vs 66 vs Flash on Artificial Analysis).
+# Curated model list. The Gemini API does NOT expose pricing, so the per-1M
+# token rates below are maintained by hand from the official pricing page
+# (https://ai.google.dev/gemini-api/docs/pricing, last checked 2026-06-24).
+# For this tool the cost drivers are audio input (the recording) and output
+# (the transcript), so each entry carries an audio rate where Google bills one
+# separately; audio_per_1m=None means audio is billed at the flat input rate.
+# Pro models add a >200k-token tier not modelled here (meetings rarely exceed
+# it). Gemini 3 Flash stays the default: best value for diarization quality.
+# Run the /models/available freshness check to spot newer models Google ships.
 MODELS = {
     "gemini": {
         "label": "Gemini 3 Flash (recommended)",
         "model": "gemini-3-flash-preview",
-    },
-    "gemini-3.1-pro": {
-        "label": "Gemini 3.1 Pro (highest quality, ~4x cost)",
-        "model": "gemini-3.1-pro-preview",
-    },
-    "gemini-3.1-flash-lite": {
-        "label": "Gemini 3.1 Flash-Lite (cheapest, weaker reasoning)",
-        "model": "gemini-3.1-flash-lite-preview",
+        "input_per_1m": 0.50,
+        "audio_per_1m": 1.00,
+        "output_per_1m": 3.00,
     },
     "gemini-2.5-flash": {
         "label": "Gemini 2.5 Flash",
         "model": "gemini-2.5-flash",
+        "input_per_1m": 0.30,
+        "audio_per_1m": 1.00,
+        "output_per_1m": 2.50,
+    },
+    "gemini-3.1-flash-lite": {
+        "label": "Gemini 3.1 Flash-Lite (cheapest)",
+        "model": "gemini-3.1-flash-lite",
+        "input_per_1m": 0.25,
+        "audio_per_1m": 0.50,
+        "output_per_1m": 1.50,
+    },
+    "gemini-3.5-flash": {
+        "label": "Gemini 3.5 Flash (newest, pricier)",
+        "model": "gemini-3.5-flash",
+        "input_per_1m": 1.50,
+        "audio_per_1m": 1.50,
+        "output_per_1m": 9.00,
+    },
+    "gemini-3.1-pro": {
+        "label": "Gemini 3.1 Pro (highest quality)",
+        "model": "gemini-3.1-pro-preview",
+        "input_per_1m": 2.00,
+        "audio_per_1m": None,
+        "output_per_1m": 12.00,
+    },
+    "gemini-2.5-pro": {
+        "label": "Gemini 2.5 Pro",
+        "model": "gemini-2.5-pro",
+        "input_per_1m": 1.25,
+        "audio_per_1m": None,
+        "output_per_1m": 10.00,
     },
 }
 DEFAULT_MODEL = "gemini"

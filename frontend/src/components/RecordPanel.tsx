@@ -19,6 +19,19 @@ type Model = {
   key: string
   label: string
   default: boolean
+  input_per_1m?: number | null
+  audio_per_1m?: number | null
+  output_per_1m?: number | null
+}
+
+// Compact per-1M-token price hint for the model dropdown. Audio input is the
+// cost driver for a recording, so show that (falling back to the flat input
+// rate when Google does not bill audio separately) alongside output.
+function modelPrice(m: Model): string | null {
+  if (m.output_per_1m == null) return null
+  const audio = m.audio_per_1m ?? m.input_per_1m
+  const audioPart = audio != null ? `audio in $${audio.toFixed(2)}/M · ` : ''
+  return `${audioPart}out $${m.output_per_1m.toFixed(2)}/M`
 }
 
 type RecordPanelProps = {
@@ -139,11 +152,17 @@ export function RecordPanel({
               <SelectValue placeholder="Select model" />
             </SelectTrigger>
             <SelectContent className="bg-zinc-900 border-zinc-700">
-              {models.map((m) => (
-                <SelectItem key={m.key} value={m.key} className="text-zinc-200 focus:bg-zinc-800 focus:text-zinc-100">
-                  {m.label}
-                </SelectItem>
-              ))}
+              {models.map((m) => {
+                const price = modelPrice(m)
+                return (
+                  <SelectItem key={m.key} value={m.key} className="text-zinc-200 focus:bg-zinc-800 focus:text-zinc-100">
+                    <span className="flex flex-col">
+                      <span>{m.label}</span>
+                      {price && <span className="text-xs text-zinc-500">{price}</span>}
+                    </span>
+                  </SelectItem>
+                )
+              })}
             </SelectContent>
           </Select>
         </div>

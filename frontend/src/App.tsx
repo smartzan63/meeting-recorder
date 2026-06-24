@@ -46,6 +46,9 @@ type Model = {
   key: string
   label: string
   default: boolean
+  input_per_1m?: number | null
+  audio_per_1m?: number | null
+  output_per_1m?: number | null
 }
 
 // --- Actions ---

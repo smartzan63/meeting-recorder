@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/dialog'
 import { SummaryCard } from './SummaryCard'
 import { HistoryPanel } from './HistoryPanel'
+import { formatLocalDateTime } from '@/lib/utils'
 
 type HistoryItem = {
   id: string
@@ -224,7 +225,7 @@ export function TranscriptPanel({
                       >
                         {v.model || 'Unknown model'}{' '}
                         <span className="text-zinc-500">
-                          · {new Date(v.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                          · {formatLocalDateTime(v.created_at)}
                         </span>
                       </SelectItem>
                     ))}

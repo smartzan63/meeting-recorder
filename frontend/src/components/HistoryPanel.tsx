@@ -9,7 +9,7 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog'
-import { cn } from '@/lib/utils'
+import { cn, formatLocalDateTime } from '@/lib/utils'
 
 type HistoryItem = {
   id: string
@@ -23,19 +23,6 @@ type HistoryPanelProps = {
   items: HistoryItem[]
   onLoad: (id: string, source: string) => void
   onDelete: (id: string) => Promise<void>
-}
-
-function formatDate(isoString: string): string {
-  try {
-    return new Date(isoString).toLocaleString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    })
-  } catch {
-    return isoString
-  }
 }
 
 export function HistoryPanel({ items, onLoad, onDelete }: HistoryPanelProps) {
@@ -78,13 +65,13 @@ export function HistoryPanel({ items, onLoad, onDelete }: HistoryPanelProps) {
             >
               <div className="flex flex-col min-w-0 flex-1">
                 <div className="flex items-center gap-1.5 min-w-0">
-                  <span className="text-sm text-zinc-200 truncate">{item.source}</span>
+                  <span className="text-sm text-zinc-200 truncate">{item.source || item.id}</span>
                   {item.has_summary && (
                     <span className="shrink-0 text-xs px-1 py-0.5 rounded bg-zinc-700 text-zinc-400 leading-none">S</span>
                   )}
                 </div>
                 <span className="text-xs text-zinc-500">
-                  {formatDate(item.created_at)}{item.model ? ` · ${item.model}` : ''}
+                  {formatLocalDateTime(item.created_at)}{item.model ? ` · ${item.model}` : ''}
                 </span>
               </div>
               <Button

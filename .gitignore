@@ -6,7 +6,12 @@ recordings/*
 !recordings/.gitkeep
 transcripts/*
 !transcripts/.gitkeep
-data/
+# Ignore all runtime data, but keep an empty data/transcripts/ so the default
+# bind-mount source exists on a fresh clone (matters on Windows hosts).
+data/*
+!data/transcripts/
+data/transcripts/*
+!data/transcripts/.gitkeep
 
 # Test recordings — may contain personal audio
 test_recordings/
