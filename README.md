@@ -12,9 +12,11 @@ Open `http://localhost:8080`, click **Start Recording**, talk, click **Stop Reco
 - AI speaker enrichment — identifies real names from conversation context and pre-fills the name editor; user edits are always preserved through re-enrichment
 - Enrich & Summarise — generates a structured English summary regardless of transcript language; auto-saved to disk; shows a warning when speaker names have changed since the last summary
 - File upload — process any audio/video file (M4A, WAV, MP4, MKV…) without OBS
+- Language selection — auto-detect English/Russian or explicitly select either language for new and reprocessed transcripts
 - Transcript history — collapsible panel of past runs; click to reload transcript, speaker names, and summary
+- Audio file management — collapsible sidebar panel listing every saved wav with processed/unprocessed status, sizes, and total disk usage; click a processed recording to load its transcript; process an unprocessed recording (backend/model/language choice) or delete any recording's audio together with its OBS source (the transcript is kept, reprocessing is forfeited); orphaned OBS source files (`.mp4` without a saved wav) are listed separately for cleanup. Deleting from History removes transcript, wav, and OBS source together
 - Export to Confluence (real REST API) or Notion — speaker substitution is applied server-side at export time, so correcting a name instantly reflects in all future exports without re-running enrichment; optional full transcript via `EXPORT_INCLUDE_TRANSCRIPT`
-- Three AI provider options: **Google Gemini**, **Azure AI Speech + Azure OpenAI**, and **Mock** (no API keys, instant canned output for UI testing)
+- Provider policy is configurable per environment: Azure is the default primary, an optional Azure or Gemini fallback runs only after a primary technical failure, and Mock returns a canned transcript for UI testing
 - Runs in Docker — no Python environment setup required
 
 ## Prerequisites
@@ -32,7 +34,7 @@ cd meeting-recorder
 
 # 2. Create .env from the template
 cp .env.example .env
-# Edit .env — set PROVIDER and fill in credentials for your chosen provider
+# Edit .env — configure the primary provider and its credentials
 
 # 3. Start the container
 docker compose up -d
@@ -74,13 +76,14 @@ Recordings, transcripts, and summaries are stored under `./data/` (volume-mounte
 
 ## Providers
 
-Set `PROVIDER=gemini`, `PROVIDER=azure`, or `PROVIDER=mock` in your `.env`.
+Set `PRIMARY_PROVIDER=azure`, `PRIMARY_PROVIDER=gemini`, or `PRIMARY_PROVIDER=mock` in your `.env`. Azure is the default. Set `FALLBACK_PROVIDER=azure` or `FALLBACK_PROVIDER=gemini` to retry a failed primary transcription once; leave it empty to disable fallback.
 
 ### Gemini (default)
 
 Requires a [Gemini API key](https://aistudio.google.com/apikey). Free tier available; connect a billing account for higher quotas and better availability.
 
 Transcription, diarization, speaker name enrichment, and summarization all use Gemini.
+In Auto mode, Gemini is instructed to preserve language switches within a meeting. Azure Fast Transcription identifies one primary language per recording, so use the manual language selector for a Russian-first or English-first Azure recording.
 
 Available models (set via the UI dropdown at runtime, which shows each model's per-1M-token audio-input and output price — all operations use the selected model):
 - `gemini-3-flash-preview` — default; best value for diarization quality
@@ -108,12 +111,13 @@ Copy `.env.example` to `.env`. The file is never committed (`.gitignore`).
 
 | Variable | Default | Description |
 |---|---|---|
-| `PROVIDER` | `gemini` | AI provider: `gemini`, `azure`, or `mock` |
+| `PRIMARY_PROVIDER` | `azure` | Primary provider: `azure`, `gemini`, or `mock` |
+| `FALLBACK_PROVIDER` | empty | Optional `azure` or `gemini` retry after a primary technical failure |
 | `OBS_PASSWORD` | — | OBS WebSocket password |
 | `OBS_HOST` | `localhost` | OBS WebSocket host |
 | `OBS_PORT` | `4455` | OBS WebSocket port |
-| `GEMINI_API_KEY` | — | Required when `PROVIDER=gemini` |
-| `AZURE_SPEECH_KEY` | — | Required when `PROVIDER=azure` |
+| `GEMINI_API_KEY` | — | Required for Gemini primary or enabled fallback |
+| `AZURE_SPEECH_KEY` | — | Required when `PRIMARY_PROVIDER=azure` |
 | `AZURE_SPEECH_REGION` | — | Azure Speech resource region (e.g. `westeurope`) |
 | `AZURE_OPENAI_ENDPOINT` | — | Azure OpenAI endpoint URL |
 | `AZURE_OPENAI_KEY` | — | Azure OpenAI key |
@@ -150,7 +154,7 @@ OBS (host) ──websocket──▶ app.py (FastAPI + WebSocket)
                     ffmpeg (MKV/MP4 → WAV)
                                 │
             ┌───────────────────┼───────────────────┐
-       PROVIDER=gemini    PROVIDER=azure        PROVIDER=mock
+       PRIMARY_PROVIDER=gemini  PRIMARY_PROVIDER=azure  PRIMARY_PROVIDER=mock
             │                   │                    │
    Gemini Files API    Azure AI Speech          canned output
    generate_content    Fast Transcription API   (no API call)
@@ -188,7 +192,7 @@ Transcripts are stored per recording in a versioned directory, so re-transcribin
 
 Use the **Choose File** / **Process File** section in the UI to upload any audio/video file directly — no OBS needed.
 
-For UI testing with no API keys at all, set `PROVIDER=mock` in `.env` — the backend returns a canned two-speaker transcript instantly.
+For UI testing with no API keys at all, set `PRIMARY_PROVIDER=mock` in `.env` — the backend returns a canned two-speaker transcript instantly.
 
 Or run the pipeline directly from the command line:
 
@@ -199,4 +203,3 @@ python test_pipeline.py path/to/recording.wav
 ## Linux Docker note
 
 `host.docker.internal:host-gateway` is already in `docker-compose.yml` so Linux is supported out of the box — no extra steps needed.
-

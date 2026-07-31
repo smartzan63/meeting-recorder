@@ -10,8 +10,9 @@ import logging
 import re
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Set
+from typing import Optional, Set
 
 from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -27,13 +28,20 @@ def _model_label(model_key: str) -> str:
 
 
 def _valid_model_key(model_key: str) -> bool:
-    if config.PROVIDER == "azure":
+    if config.PRIMARY_PROVIDER == "azure":
         return model_key == "azure"
     return model_key in config.MODELS
 
 
 def _default_model_key() -> str:
-    return "azure" if config.PROVIDER == "azure" else config.DEFAULT_MODEL
+    return "azure" if config.PRIMARY_PROVIDER == "azure" else config.DEFAULT_MODEL
+
+
+def _available_providers() -> list[str]:
+    providers = [config.PRIMARY_PROVIDER]
+    if config.FALLBACK_PROVIDER and config.FALLBACK_PROVIDER not in providers:
+        providers.append(config.FALLBACK_PROVIDER)
+    return providers
 import obs
 import pipeline
 import storage
@@ -50,6 +58,12 @@ _ws_clients: Set[WebSocket] = set()
 _stopped_path: str | None = None  # OBS output path held between stop and user naming
 _recording_started_at: float | None = None
 _obs_connected: bool = False
+_TRANSCRIPTION_LANGUAGES = {"auto", "en-US", "ru-RU"}
+
+
+def _transcription_language(value: object) -> str:
+    language = str(value or "auto")
+    return language if language in _TRANSCRIPTION_LANGUAGES else "auto"
 
 
 # ── WebSocket helpers ─────────────────────────────────────────────────────────
@@ -161,7 +175,11 @@ async def integrations():
 
 @app.get("/models")
 async def models():
-    if config.PROVIDER == "azure":
+    return _models_for_provider(config.PRIMARY_PROVIDER)
+
+
+def _models_for_provider(provider: str) -> list[dict]:
+    if provider == "azure":
         return [{"key": "azure", "label": "Azure AI Speech", "default": True}]
     return [
         {
@@ -174,6 +192,18 @@ async def models():
         }
         for key, cfg in config.MODELS.items()
     ]
+
+
+@app.get("/providers/{provider}/models")
+async def provider_models(provider: str):
+    if provider not in _available_providers():
+        return JSONResponse(status_code=404, content={"error": "Provider is not configured"})
+    return _models_for_provider(provider)
+
+
+@app.get("/providers")
+async def providers():
+    return [{"key": p, "label": "Azure AI Speech" if p == "azure" else "Google Gemini", "primary": p == config.PRIMARY_PROVIDER} for p in _available_providers()]
 
 
 @app.post("/recording/start")
@@ -254,6 +284,7 @@ async def upload_file(
     file: UploadFile = File(...),
     model: str = Form(default=config.DEFAULT_MODEL),
     task: str = Form(default="transcribe"),
+    language: str = Form(default="auto"),
 ):
     """Accept an audio file upload (M4A, WAV, MP4, MKV, …) and run the pipeline on it."""
     if _state == "transcribing":
@@ -278,7 +309,7 @@ async def upload_file(
         recording_name = f"{recording_name}_{int(time.time())}"
 
     await _send_status("transcribing", "Processing uploaded file...")
-    asyncio.create_task(_run_pipeline(str(dest), recording_name, model, task))
+    asyncio.create_task(_run_pipeline(str(dest), recording_name, model, task, language=_transcription_language(language)))
     return {"state": "transcribing", "id": recording_name}
 
 
@@ -397,8 +428,9 @@ async def test_process(body: dict):
     if task not in ("transcribe", "translate"):
         task = "transcribe"
     recording_name = storage.sanitize_id(Path(audio_path).stem)
+    language = _transcription_language(body.get("language"))
     await _send_status("transcribing", "Processing recording...")
-    asyncio.create_task(_run_pipeline(audio_path, recording_name, model_key, task))
+    asyncio.create_task(_run_pipeline(audio_path, recording_name, model_key, task, language=language))
     return {"state": "transcribing", "id": recording_name}
 
 
@@ -459,16 +491,22 @@ async def reprocess_transcript(transcript_id: str, body: dict):
             content={"error": f"Original audio not found: {wav_path.name}"},
         )
 
-    model_key = (body.get("model") or "").strip()
-    if not _valid_model_key(model_key):
-        return JSONResponse(status_code=400, content={"error": f"Unknown model: {model_key}"})
+    provider = (body.get("provider") or config.PRIMARY_PROVIDER).strip()
+    if provider not in _available_providers():
+        return JSONResponse(status_code=400, content={"error": f"Provider is not configured: {provider}"})
+    model_key = (body.get("model") or ("azure" if provider == "azure" else config.DEFAULT_MODEL)).strip()
+    if provider == "azure":
+        model_key = "azure"
+    elif model_key not in config.MODELS:
+        return JSONResponse(status_code=400, content={"error": f"Unknown Gemini model: {model_key}"})
 
     task = body.get("task", "transcribe")
     if task not in ("transcribe", "translate"):
         task = "transcribe"
 
+    language = _transcription_language(body.get("language"))
     await _send_status("transcribing", f"Reprocessing with {_model_label(model_key)}...")
-    asyncio.create_task(_run_pipeline(str(wav_path), transcript_id, model_key, task))
+    asyncio.create_task(_run_pipeline(str(wav_path), transcript_id, model_key, task, language=language, provider=provider))
     return {"state": "transcribing", "id": transcript_id}
 
 
@@ -477,8 +515,120 @@ async def delete_transcript(transcript_id: str):
     if storage.get_recording(transcript_id) is None:
         return JSONResponse(status_code=404, content={"error": "Not found"})
     storage.delete_recording(transcript_id)
-    (Path(config.RECORDINGS_DIR) / f"{transcript_id}.wav").unlink(missing_ok=True)
+    recordings_dir = Path(config.RECORDINGS_DIR)
+    (recordings_dir / f"{transcript_id}.wav").unlink(missing_ok=True)
+    source = _find_source_mp4(transcript_id, recordings_dir)
+    if source:
+        source.unlink(missing_ok=True)
     return {"deleted": transcript_id}
+
+
+# ── Audio file management ─────────────────────────────────────────────────────
+
+_AUDIO_SUFFIXES = {".wav", ".mp4"}
+
+
+def _find_source_mp4(wav_stem: str, recordings_dir: Path) -> Optional[Path]:
+    """Match a saved wav back to its OBS source file.
+
+    OBS produces `YYYY-MM-DD HH-MM-SS.mp4`; saving converts it to
+    `YYYY-MM-DD_HH-MM-SS-<title>.wav`, so the mp4 stem with its first space
+    turned into an underscore is a prefix of the wav stem.
+    """
+    for mp4 in recordings_dir.glob("*.mp4"):
+        key = mp4.stem.replace(" ", "_", 1)
+        if wav_stem == key or wav_stem.startswith(key + "-"):
+            return mp4
+    return None
+
+
+def _has_transcript(rec_id: str) -> bool:
+    transcripts_dir = Path(config.TRANSCRIPTS_DIR)
+    return (
+        (transcripts_dir / rec_id / "index.json").exists()
+        or (transcripts_dir / f"{rec_id}.txt").exists()
+    )
+
+
+def _file_entry(p: Path) -> dict:
+    stat = p.stat()
+    return {
+        "size_mb": round(stat.st_size / 1e6, 1),
+        "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+    }
+
+
+@app.get("/audio")
+async def list_audio_files():
+    """List saved audio: wavs with processed flag + orphaned OBS source files."""
+    recordings_dir = Path(config.RECORDINGS_DIR)
+    if not recordings_dir.exists():
+        return {"recordings": [], "orphaned_sources": [], "total_mb": 0}
+
+    recordings = []
+    referenced_sources: set[str] = set()
+    total_bytes = 0
+    for wav in sorted(recordings_dir.glob("*.wav"), key=lambda p: p.stat().st_mtime, reverse=True):
+        total_bytes += wav.stat().st_size
+        source = _find_source_mp4(wav.stem, recordings_dir)
+        source_size = None
+        if source:
+            referenced_sources.add(source.name)
+            source_size = source.stat().st_size
+        recordings.append({
+            "id": wav.stem,
+            "file": wav.name,
+            **_file_entry(wav),
+            "processed": _has_transcript(wav.stem),
+            "source_file": source.name if source else None,
+            "source_size_mb": round(source_size / 1e6, 1) if source_size else None,
+        })
+
+    orphaned = []
+    for mp4 in sorted(recordings_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True):
+        total_bytes += mp4.stat().st_size
+        if mp4.name in referenced_sources:
+            continue
+        orphaned.append({"file": mp4.name, **_file_entry(mp4)})
+
+    return {
+        "recordings": recordings,
+        "orphaned_sources": orphaned,
+        "total_mb": round(total_bytes / 1e6, 1),
+    }
+
+
+@app.delete("/audio/{filename}")
+async def delete_audio_file(filename: str):
+    """Delete one audio file by exact name.
+
+    A saved wav is removed together with its OBS source file. The transcript
+    (if any) is kept: transcripts live in the transcript store, not the audio
+    dir, so deleting audio only forfeits the ability to reprocess later.
+    """
+    name = Path(filename).name  # strip any path traversal
+    if name != filename or Path(name).suffix.lower() not in _AUDIO_SUFFIXES:
+        return JSONResponse(status_code=400, content={"error": "Invalid audio file name"})
+    recordings_dir = Path(config.RECORDINGS_DIR)
+    target = recordings_dir / name
+    if not target.exists():
+        return JSONResponse(status_code=404, content={"error": "File not found"})
+
+    deleted = [name]
+    if target.suffix.lower() == ".wav":
+        source = _find_source_mp4(target.stem, recordings_dir)
+        target.unlink()
+        if source:
+            source.unlink(missing_ok=True)
+            deleted.append(source.name)
+    else:
+        for wav in recordings_dir.glob("*.wav"):
+            if _find_source_mp4(wav.stem, recordings_dir) == target:
+                return JSONResponse(status_code=409, content={"error": f"Still referenced by {wav.name}"})
+        target.unlink()
+
+    logger.info("Audio deleted: %s", deleted)
+    return {"deleted": deleted, "transcript_kept": _has_transcript(Path(name).stem)}
 
 
 @app.websocket("/ws")
@@ -503,8 +653,8 @@ async def websocket_endpoint(ws: WebSocket):
 
 # ── Background pipeline task ──────────────────────────────────────────────────
 
-async def _run_pipeline(audio_path: str, recording_name: str, model_key: str = config.DEFAULT_MODEL, task: str = "transcribe", save_wav: bool = False) -> None:
-    logger.info("Pipeline started: source=%s model=%s task=%s", audio_path, model_key, task)
+async def _run_pipeline(audio_path: str, recording_name: str, model_key: str = config.DEFAULT_MODEL, task: str = "transcribe", save_wav: bool = False, language: str = "auto", provider: str | None = None) -> None:
+    logger.info("Pipeline started: source=%s model=%s task=%s language=%s", audio_path, model_key, task, language)
 
     transcripts_dir = Path(config.TRANSCRIPTS_DIR)
     transcripts_dir.mkdir(parents=True, exist_ok=True)
@@ -535,7 +685,7 @@ async def _run_pipeline(audio_path: str, recording_name: str, model_key: str = c
 
     try:
         import functools
-        transcript = await loop.run_in_executor(
+        transcript, fallback_used = await loop.run_in_executor(
             None,
             functools.partial(
                 pipeline._run_pipeline_sync,
@@ -545,6 +695,8 @@ async def _run_pipeline(audio_path: str, recording_name: str, model_key: str = c
                 model_key,
                 task,
                 config.RECORDINGS_DIR if save_wav else None,
+                language,
+                provider,
             ),
         )
 
@@ -552,7 +704,9 @@ async def _run_pipeline(audio_path: str, recording_name: str, model_key: str = c
         status_queue.put_nowait(None)
         await drain_task
 
-        model_label = _model_label(model_key)
+        language_label = {"auto": "Auto", "en-US": "English", "ru-RU": "Russian"}[language]
+        provider_label = "Azure AI Speech" if provider == "azure" else "Google Gemini" if provider == "gemini" else _model_label(model_key)
+        model_label = f"{fallback_used or provider_label} ({language_label})"
 
         # Pipeline writes a flat transcript file alongside its old contract; remove it
         # before recording the version, otherwise migrate_legacy would turn it into a

@@ -81,6 +81,23 @@ def _active_version(index: dict) -> Optional[dict]:
     return None
 
 
+def _recover_active_version(rec_id: str, index: dict) -> Optional[dict]:
+    """Repair an index after a transcript file was removed outside the UI."""
+    rec_dir = _rec_dir(rec_id)
+    available = [v for v in index.get("versions", []) if (rec_dir / f"{v.get('id')}.txt").exists()]
+    if len(available) != len(index.get("versions", [])):
+        index["versions"] = available
+
+    active = _active_version(index)
+    if active is None and available:
+        index["active"] = available[-1]["id"]
+        active = available[-1]
+
+    if active is not None:
+        _write_index(rec_id, index)
+    return active
+
+
 def _new_version_id() -> str:
     return f"v{int(time.time() * 1000)}"
 
@@ -150,7 +167,7 @@ def list_recordings() -> list[dict]:
         if not rec_dir.is_dir():
             continue
         index = _read_index(rec_dir.name)
-        active = _active_version(index)
+        active = _recover_active_version(rec_dir.name, index)
         if not active:
             continue
         results.append({
@@ -168,7 +185,7 @@ def list_recordings() -> list[dict]:
 def get_recording(rec_id: str) -> Optional[dict]:
     migrate_legacy(rec_id)
     index = _read_index(rec_id)
-    active = _active_version(index)
+    active = _recover_active_version(rec_id, index)
     if not active:
         return None
     rec_dir = _rec_dir(rec_id)
@@ -238,6 +255,8 @@ def set_active(rec_id: str, version_id: str) -> bool:
     if not index:
         return False
     if not any(v.get("id") == version_id for v in index.get("versions", [])):
+        return False
+    if not (_rec_dir(rec_id) / f"{version_id}.txt").exists():
         return False
     index["active"] = version_id
     _write_index(rec_id, index)

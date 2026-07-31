@@ -41,6 +41,8 @@ type RecordPanelProps = {
   models: Model[]
   selectedModel: string
   onModelChange: (key: string) => void
+  selectedLanguage: string
+  onLanguageChange: (language: string) => void
   savedWavPath: string | null
   defaultRecordingName: string
   showSaveDialog: boolean
@@ -68,6 +70,8 @@ export function RecordPanel({
   models,
   selectedModel,
   onModelChange,
+  selectedLanguage,
+  onLanguageChange,
   savedWavPath,
   defaultRecordingName,
   showSaveDialog,
@@ -167,6 +171,18 @@ export function RecordPanel({
           </Select>
         </div>
       )}
+
+      <div className="w-full max-w-xs">
+        <Select value={selectedLanguage} onValueChange={onLanguageChange} disabled={isBusy}>
+          <SelectTrigger className="bg-zinc-900 border-zinc-700 text-zinc-200"><SelectValue /></SelectTrigger>
+          <SelectContent className="bg-zinc-900 border-zinc-700">
+            <SelectItem value="auto" className="text-zinc-200">Auto-detect</SelectItem>
+            <SelectItem value="en-US" className="text-zinc-200">English</SelectItem>
+            <SelectItem value="ru-RU" className="text-zinc-200">Russian</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="mt-1 text-xs text-zinc-500">Auto detects one primary language per recording.</p>
+      </div>
 
 
       {/* Record button */}

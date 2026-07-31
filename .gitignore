@@ -1,5 +1,6 @@
 # Secrets — never commit
 .env
+compose.override.yaml
 
 # Runtime data — personal recordings and transcripts
 recordings/*

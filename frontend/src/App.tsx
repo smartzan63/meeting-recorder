@@ -1,9 +1,10 @@
 import { useReducer, useEffect, useCallback, useRef } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge } from '@/components/ui/badge'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { RecordPanel } from '@/components/RecordPanel'
 import { TranscriptPanel } from '@/components/TranscriptPanel'
+import { AudioFilesPanel } from '@/components/AudioFilesPanel'
 
 // --- Types ---
 
@@ -29,6 +30,7 @@ type AppState = {
   summaryMarkdown: string
   isSummarizing: boolean
   selectedModel: string
+  selectedLanguage: string
   translateEnabled: boolean
   history: Array<{ id: string; source: string; model: string; created_at: string; has_summary?: boolean }>
   enrichedSpeakers: Record<string, string>
@@ -51,6 +53,8 @@ type Model = {
   output_per_1m?: number | null
 }
 
+type Provider = { key: string; label: string; primary: boolean }
+
 // --- Actions ---
 
 type Action =
@@ -69,6 +73,7 @@ type Action =
   | { type: 'SET_SUMMARIZING'; value: boolean }
   | { type: 'DISMISS_SUMMARY' }
   | { type: 'SET_MODEL'; key: string }
+  | { type: 'SET_LANGUAGE'; language: string }
   | { type: 'SET_TRANSLATE'; value: boolean }
   | { type: 'SET_HISTORY'; items: AppState['history'] }
   | { type: 'SET_ENRICHED_SPEAKERS'; speakers: Record<string, string> }
@@ -96,6 +101,7 @@ const initialState: AppState = {
   summaryMarkdown: '',
   isSummarizing: false,
   selectedModel: '',
+  selectedLanguage: 'auto',
   translateEnabled: false,
   history: [],
   enrichedSpeakers: {},
@@ -192,6 +198,8 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, summaryMarkdown: '' }
     case 'SET_MODEL':
       return { ...state, selectedModel: action.key }
+    case 'SET_LANGUAGE':
+      return { ...state, selectedLanguage: action.language }
     case 'SET_TRANSLATE':
       return { ...state, translateEnabled: action.value }
     case 'SET_HISTORY':
@@ -244,6 +252,18 @@ async function fetchTranscript(id: string): Promise<{ text: string; meta: { sour
   return res.json()
 }
 
+type AudioFilesData = {
+  recordings: Array<{ id: string; file: string; size_mb: number; modified: string; processed: boolean; source_file: string | null; source_size_mb: number | null }>
+  orphaned_sources: Array<{ file: string; size_mb: number; modified: string }>
+  total_mb: number
+}
+
+async function fetchAudioFiles(): Promise<AudioFilesData> {
+  const res = await fetch('/audio')
+  if (!res.ok) return { recordings: [], orphaned_sources: [], total_mb: 0 }
+  return res.json()
+}
+
 // --- App ---
 
 export default function App() {
@@ -251,6 +271,7 @@ export default function App() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const stoppingRef = useRef(false)
   const { lastMessage } = useWebSocket()
+  const queryClient = useQueryClient()
 
   // Fetch models
   const { data: models = [] } = useQuery<Model[]>({
@@ -260,6 +281,17 @@ export default function App() {
       if (!res.ok) return []
       return res.json()
     },
+  })
+  const { data: providers = [] } = useQuery<Provider[]>({
+    queryKey: ['providers'],
+    queryFn: async () => {
+      const res = await fetch('/providers')
+      return res.ok ? res.json() : []
+    },
+  })
+  const { data: audioFiles = { recordings: [], orphaned_sources: [], total_mb: 0 } } = useQuery<AudioFilesData>({
+    queryKey: ['audio-files'],
+    queryFn: fetchAudioFiles,
   })
 
   // Set default model once models load
@@ -339,10 +371,11 @@ export default function App() {
       }
       // Reprocess clears the displayed summary; new transcript starts without one
       dispatch({ type: 'DISMISS_SUMMARY' })
-      // Refresh history
+      // Refresh history and the audio file list (processed flags change)
       void fetchHistory().then((items) => dispatch({ type: 'SET_HISTORY', items }))
+      void queryClient.invalidateQueries({ queryKey: ['audio-files'] })
     }
-  }, [lastMessage, state.status])
+  }, [lastMessage, state.status, queryClient])
 
   // Load history, integrations, and OBS status on mount
   useEffect(() => {
@@ -398,6 +431,7 @@ export default function App() {
         file: state.savedWavPath,
         model: state.selectedModel,
         task: state.translateEnabled ? 'translate' : 'transcribe',
+        language: state.selectedLanguage,
       })
     } catch (err) {
       dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
@@ -425,6 +459,7 @@ export default function App() {
       formData.append('file', file)
       formData.append('model', state.selectedModel)
       formData.append('task', state.translateEnabled ? 'translate' : 'transcribe')
+      formData.append('language', state.selectedLanguage)
       const res = await fetch('/upload', { method: 'POST', body: formData })
       if (!res.ok) {
         const text = await res.text()
@@ -434,7 +469,7 @@ export default function App() {
     } catch (err) {
       dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
     }
-  }, [state.selectedModel, state.translateEnabled])
+  }, [state.selectedModel, state.selectedLanguage, state.translateEnabled])
 
   const handleEnrichAndSummarize = useCallback(async () => {
     if (!state.transcript) return
@@ -496,13 +531,13 @@ export default function App() {
     dispatch({ type: 'SET_HISTORY', items })
   }, [])
 
-  const handleReprocess = useCallback(async (modelKey: string) => {
+  const handleReprocess = useCallback(async (provider: string, model: string, language: string) => {
     if (!state.currentRecordingName) return
     try {
       const res = await fetch(`/transcripts/${state.currentRecordingName}/reprocess`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: modelKey }),
+        body: JSON.stringify({ provider, model, language }),
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
@@ -515,6 +550,33 @@ export default function App() {
       dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
     }
   }, [state.currentRecordingName])
+
+  const handleProcessAudio = useCallback(async (id: string, provider: string, model: string, language: string) => {
+    try {
+      const res = await fetch(`/transcripts/${encodeURIComponent(id)}/reprocess`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider, model, language }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
+        throw new Error(err.error || 'Process failed')
+      }
+      // Pipeline runs in background — WebSocket status messages will drive the UI,
+      // and the transcript message refreshes the audio file list.
+    } catch (err) {
+      dispatch({ type: 'SET_STATUS', status: 'error', message: String(err) })
+    }
+  }, [])
+
+  const handleDeleteAudio = useCallback(async (filename: string) => {
+    const res = await fetch(`/audio/${encodeURIComponent(filename)}`, { method: 'DELETE' })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
+      throw new Error(err.error || 'Delete failed')
+    }
+    await queryClient.invalidateQueries({ queryKey: ['audio-files'] })
+  }, [queryClient])
 
   const applyTranscriptData = useCallback((id: string, data: Awaited<ReturnType<typeof fetchTranscript>>) => {
     dispatch({ type: 'SET_TRANSCRIPT', text: data.text, model: data.meta.model })
@@ -675,6 +737,8 @@ export default function App() {
             models={models}
             selectedModel={state.selectedModel}
             onModelChange={(key) => dispatch({ type: 'SET_MODEL', key })}
+            selectedLanguage={state.selectedLanguage}
+            onLanguageChange={(language) => dispatch({ type: 'SET_LANGUAGE', language })}
             savedWavPath={state.savedWavPath}
             defaultRecordingName={state.defaultRecordingName}
             showSaveDialog={state.showSaveDialog}
@@ -699,6 +763,18 @@ export default function App() {
               </button>
             </div>
           )}
+          <div className="px-6 pb-6">
+            <AudioFilesPanel
+              recordings={audioFiles.recordings}
+              orphanedSources={audioFiles.orphaned_sources}
+              totalMb={audioFiles.total_mb}
+              providers={providers}
+              onProcess={handleProcessAudio}
+              onDelete={handleDeleteAudio}
+              onLoad={(id) => void handleLoadHistory(id, id)}
+              busy={isLoading}
+            />
+          </div>
         </aside>
 
         {/* Transcript panel */}
@@ -727,6 +803,7 @@ export default function App() {
             onDownload={handleDownload}
             integrations={state.integrations}
             models={models}
+            providers={providers}
             onReprocess={handleReprocess}
             versions={state.versions}
             activeVersion={state.activeVersion}

@@ -13,9 +13,11 @@ RECORDINGS_DIR = os.getenv("RECORDINGS_DIR", "./data/audio")
 TRANSCRIPTS_DIR = os.getenv("TRANSCRIPTS_DIR", "./data/transcripts")
 SUMMARIES_DIR = os.getenv("SUMMARIES_DIR", "./data/summaries")
 
-# Provider: "gemini", "azure", or "mock" — independent of OS
-# "mock" returns canned transcript/summary instantly, no API keys required
-PROVIDER = os.getenv("PROVIDER", "gemini")
+# Configure providers independently for each environment. The fallback is
+# optional and is only used after a technical failure in the primary provider.
+# "mock" returns canned transcript/summary instantly for local UI testing.
+PRIMARY_PROVIDER = os.getenv("PRIMARY_PROVIDER", "azure")
+FALLBACK_PROVIDER = os.getenv("FALLBACK_PROVIDER", "").strip()
 
 # --- Gemini ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")

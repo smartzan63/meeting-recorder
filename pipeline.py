@@ -1,7 +1,7 @@
 """
 Cloud transcription pipeline: ffmpeg (MKV only) → AI provider → transcript.
 
-Provider is selected via PROVIDER env var: "gemini" (default) or "azure".
+The primary and optional fallback providers are configured independently.
 All heavy steps run in a thread pool executor to avoid blocking the event loop.
 """
 
@@ -48,7 +48,8 @@ def _transcribe_with_gemini(
     audio_path: str,
     model_key: str,
     status_callback: Callable[[str], None],
-) -> str:
+    language: str = "auto",
+) -> tuple[str, str | None]:
     """Upload audio to Gemini Files API and return a speaker-labeled transcript."""
     if not config.GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is not set — add it to your .env file")
@@ -72,6 +73,11 @@ def _transcribe_with_gemini(
 
     status_callback(f"Transcribing with {label}...")
     t0 = time.time()
+    language_instruction = {
+        "auto": "Detect each speaker's language and preserve every language switch within the recording.",
+        "en-US": "The meeting is primarily in English. Preserve any clearly spoken non-English passages rather than translating them.",
+        "ru-RU": "The meeting is primarily in Russian. Preserve any clearly spoken non-Russian passages rather than translating them.",
+    }[language]
     response = client.models.generate_content(
         model=model,
         contents=[
@@ -84,7 +90,8 @@ text here
 [MM:SS] SPEAKER_01
 text here
 
-Use timestamps (MM:SS) relative to the start of the audio. Keep the original language of each speaker.""",
+Use timestamps (MM:SS) relative to the start of the audio. Keep the original language of each speaker.
+{language_instruction}""".format(language_instruction=language_instruction),
             audio_file,
         ],
     )
@@ -101,7 +108,8 @@ Use timestamps (MM:SS) relative to the start of the audio. Keep the original lan
 def _transcribe_with_azure(
     audio_path: str,
     status_callback: Callable[[str], None],
-) -> str:
+    language: str = "auto",
+) -> tuple[str, str | None]:
     """Transcribe audio using Azure AI Speech Fast Transcription API with diarization."""
     import json
     import requests
@@ -113,7 +121,9 @@ def _transcribe_with_azure(
     url = f"https://{region}.api.cognitive.microsoft.com/speechtotext/transcriptions:transcribe?api-version=2024-11-15"
 
     definition = {
-        "locales": ["en-US"],
+        # Omitting locales lets Azure identify any supported primary language.
+        # Explicit locale selection remains available when recognition needs help.
+        **({} if language == "auto" else {"locales": [language]}),
         "diarization": {"enabled": True},
         "profanityFilterMode": "None",
     }
@@ -138,6 +148,14 @@ def _transcribe_with_azure(
 
     data = response.json()
     return _format_azure_transcript(data)
+
+
+def _transcribe(provider: str, audio_path: str, model_key: str, status_callback: Callable[[str], None], language: str) -> str:
+    if provider == "azure":
+        return _transcribe_with_azure(audio_path, status_callback, language)
+    if provider == "gemini":
+        return _transcribe_with_gemini(audio_path, model_key, status_callback, language)
+    raise RuntimeError(f"Unsupported transcription provider: {provider}")
 
 
 def _format_azure_transcript(data: dict) -> str:
@@ -201,14 +219,14 @@ def enrich_transcript(transcript: str, model_key: str = config.DEFAULT_MODEL) ->
     """Identify real speaker names from transcript context. Returns a mapping like
     {"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"} or {} if names cannot be determined.
 
-    Uses Azure OpenAI when PROVIDER=azure, Gemini otherwise.
+    Uses Azure OpenAI when Azure is the primary provider, Gemini otherwise.
     Never raises — returns {} on any error.
     """
-    if config.PROVIDER == "mock":
+    if config.PRIMARY_PROVIDER == "mock":
         return {}
 
     try:
-        if config.PROVIDER == "azure":
+        if config.PRIMARY_PROVIDER == "azure":
             if not config.AZURE_OPENAI_KEY:
                 logger.warning("enrich_transcript: AZURE_OPENAI_KEY not set, skipping enrichment")
                 return {}
@@ -268,9 +286,9 @@ _MOCK_SUMMARY = """\
 
 def summarize_transcript(transcript: str, model_key: str = config.DEFAULT_MODEL) -> str:
     """Summarize a transcript using the configured provider. Returns markdown."""
-    if config.PROVIDER == "mock":
+    if config.PRIMARY_PROVIDER == "mock":
         return _MOCK_SUMMARY
-    if config.PROVIDER == "azure":
+    if config.PRIMARY_PROVIDER == "azure":
         return _summarize_with_azure(transcript)
     return _summarize_with_gemini(transcript, model_key)
 
@@ -337,6 +355,8 @@ def _run_pipeline_sync(
     model_key: str = config.DEFAULT_MODEL,
     task: str = "transcribe",
     wav_dir: str | None = None,
+    language: str = "auto",
+    primary_provider: str | None = None,
 ) -> str:
     """Synchronous cloud pipeline — intended to run in a thread pool executor.
 
@@ -347,7 +367,8 @@ def _run_pipeline_sync(
     os.makedirs(transcripts_dir, exist_ok=True)
 
     # Mock mode: skip ffmpeg and LLM entirely, return canned transcript
-    if config.PROVIDER == "mock":
+    provider = primary_provider or config.PRIMARY_PROVIDER
+    if provider == "mock":
         status_callback("Mock provider: returning canned transcript...")
         time.sleep(0.5)  # simulate processing time so UI state transitions are visible
         transcript = _MOCK_TRANSCRIPT
@@ -356,7 +377,7 @@ def _run_pipeline_sync(
             f.write(transcript)
         logger.info("Mock transcript saved: %s", transcript_path)
         status_callback("Pipeline complete.")
-        return transcript
+        return transcript, None
 
     # MKV always needs conversion; Azure Speech also works best with WAV
     ext = Path(audio_path).suffix.lower()
@@ -371,10 +392,18 @@ def _run_pipeline_sync(
     else:
         upload_path = audio_path
 
-    if config.PROVIDER == "azure":
-        transcript = _transcribe_with_azure(upload_path, status_callback)
-    else:
-        transcript = _transcribe_with_gemini(upload_path, model_key, status_callback)
+    try:
+        transcript = _transcribe(provider, upload_path, model_key, status_callback, language)
+        fallback_used = None
+    except Exception:
+        fallback_provider = "" if primary_provider else config.FALLBACK_PROVIDER
+        if not fallback_provider or fallback_provider == provider:
+            raise
+        logger.exception("%s transcription failed; retrying once with %s fallback", provider, fallback_provider)
+        status_callback(f"{provider.title()} transcription failed; retrying with {fallback_provider.title()} fallback...")
+        fallback_model = config.DEFAULT_MODEL if fallback_provider == "gemini" else "azure"
+        transcript = _transcribe(fallback_provider, upload_path, fallback_model, status_callback, language)
+        fallback_used = f"{fallback_provider.title()} fallback"
 
     transcript_path = os.path.join(transcripts_dir, f"{recording_name}.txt")
     with open(transcript_path, "w", encoding="utf-8") as f:
@@ -382,7 +411,7 @@ def _run_pipeline_sync(
     logger.info("Transcript saved: %s", transcript_path)
 
     status_callback("Pipeline complete.")
-    return transcript
+    return transcript, fallback_used
 
 
 async def run(audio_path: str, recording_name: str, status_callback: Callable[[str], None]) -> str:
@@ -394,7 +423,7 @@ async def run(audio_path: str, recording_name: str, status_callback: Callable[[s
 
     return await loop.run_in_executor(
         None,
-        lambda: _run_pipeline_sync(audio_path, recording_name, sync_callback),
+        lambda: _run_pipeline_sync(audio_path, recording_name, sync_callback)[0],
     )
 
 

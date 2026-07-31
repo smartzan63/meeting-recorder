@@ -47,7 +47,8 @@ type TranscriptPanelProps = {
   onDownload: () => void
   integrations: { confluence: boolean; notion: boolean }
   models: { key: string; label: string; default?: boolean }[]
-  onReprocess?: (modelKey: string) => Promise<void>
+  providers: { key: string; label: string; primary: boolean }[]
+  onReprocess?: (provider: string, model: string, language: string) => Promise<void>
   versions: Array<{ id: string; model: string; created_at: string; has_summary?: boolean }>
   activeVersion: string | null
   onSwitchVersion?: (versionId: string) => Promise<void>
@@ -90,6 +91,7 @@ export function TranscriptPanel({
   onDownload,
   integrations,
   models,
+  providers,
   onReprocess,
   versions,
   activeVersion,
@@ -99,7 +101,21 @@ export function TranscriptPanel({
   const [copied, setCopied] = useState(false)
   const [reprocessOpen, setReprocessOpen] = useState(false)
   const [reprocessModel, setReprocessModel] = useState<string>('')
+  const [reprocessProvider, setReprocessProvider] = useState<string>('')
+  const [reprocessModels, setReprocessModels] = useState<{ key: string; label: string; default?: boolean }[]>([])
+  const [reprocessLanguage, setReprocessLanguage] = useState('auto')
   const [summaryIsStale, setSummaryIsStale] = useState(false)
+
+  useEffect(() => {
+    if (!reprocessProvider) return
+    void fetch(`/providers/${reprocessProvider}/models`)
+      .then((response) => response.ok ? response.json() : [])
+      .then((availableModels) => {
+        setReprocessModels(availableModels)
+        const defaultModel = availableModels.find((model: { default?: boolean }) => model.default) ?? availableModels[0]
+        setReprocessModel(defaultModel?.key ?? '')
+      })
+  }, [reprocessProvider])
 
   // Prefer the canonical list stored at transcription time; fall back to scanning the text
   const speakers = useMemo(
@@ -242,8 +258,7 @@ export function TranscriptPanel({
                   size="sm"
                   className="h-7 px-2 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 gap-1"
                   onClick={() => {
-                    const def = models.find((m) => m.default) ?? models[0]
-                    setReprocessModel(def?.key ?? '')
+                    setReprocessProvider(providers.find((provider) => provider.primary)?.key ?? providers[0]?.key ?? '')
                     setReprocessOpen(true)
                   }}
                   disabled={isLoading}
@@ -407,23 +422,44 @@ export function TranscriptPanel({
               existing transcript and saved summary will be overwritten.
             </p>
             <div className="flex flex-col gap-1.5">
-              <span className="text-xs text-zinc-500">Model</span>
-              <Select value={reprocessModel} onValueChange={setReprocessModel}>
+              <span className="text-xs text-zinc-500">Backend</span>
+              <Select value={reprocessProvider} onValueChange={setReprocessProvider}>
                 <SelectTrigger className="bg-zinc-900 border-zinc-700 text-zinc-200">
                   <SelectValue placeholder="Select model" />
                 </SelectTrigger>
                 <SelectContent className="bg-zinc-900 border-zinc-700">
-                  {models.map((m) => (
+                  {providers.map((provider) => (
                     <SelectItem
-                      key={m.key}
-                      value={m.key}
+                      key={provider.key}
+                      value={provider.key}
                       className="text-zinc-200 focus:bg-zinc-800 focus:text-zinc-100"
                     >
-                      {m.label}
+                      {provider.label}{provider.primary ? ' (primary)' : ''}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs text-zinc-500">Model</span>
+              <Select value={reprocessModel} onValueChange={setReprocessModel}>
+                <SelectTrigger className="bg-zinc-900 border-zinc-700 text-zinc-200"><SelectValue /></SelectTrigger>
+                <SelectContent className="bg-zinc-900 border-zinc-700">
+                  {reprocessModels.map((model) => <SelectItem key={model.key} value={model.key} className="text-zinc-200">{model.label}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs text-zinc-500">Language</span>
+              <Select value={reprocessLanguage} onValueChange={setReprocessLanguage}>
+                <SelectTrigger className="bg-zinc-900 border-zinc-700 text-zinc-200"><SelectValue /></SelectTrigger>
+                <SelectContent className="bg-zinc-900 border-zinc-700">
+                  <SelectItem value="auto" className="text-zinc-200">Auto-detect</SelectItem>
+                  <SelectItem value="en-US" className="text-zinc-200">English</SelectItem>
+                  <SelectItem value="ru-RU" className="text-zinc-200">Russian</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-zinc-500">Auto detects one primary language per recording.</p>
             </div>
           </div>
           <DialogFooter>
@@ -436,11 +472,11 @@ export function TranscriptPanel({
             </Button>
             <Button
               onClick={() => {
-                if (!onReprocess || !reprocessModel) return
+                if (!onReprocess || !reprocessProvider || !reprocessModel) return
                 setReprocessOpen(false)
-                void onReprocess(reprocessModel)
+                void onReprocess(reprocessProvider, reprocessModel, reprocessLanguage)
               }}
-              disabled={!reprocessModel}
+              disabled={!reprocessProvider || !reprocessModel}
               className="bg-zinc-100 text-zinc-900 hover:bg-zinc-200 border-0"
             >
               Reprocess

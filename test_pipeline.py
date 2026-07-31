@@ -32,7 +32,7 @@ def status(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
 import pipeline
-transcript = pipeline._run_pipeline_sync(audio_path, output_dir, status)
+transcript, _ = pipeline._run_pipeline_sync(audio_path, output_dir, status)
 
 print()
 print("=" * 60)
