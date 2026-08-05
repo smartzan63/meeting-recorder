@@ -24,7 +24,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # Curated model list. The Gemini API does NOT expose pricing, so the per-1M
 # token rates below are maintained by hand from the official pricing page
-# (https://ai.google.dev/gemini-api/docs/pricing, last checked 2026-06-24).
+# (https://ai.google.dev/gemini-api/docs/pricing, last checked 2026-08-04).
 # For this tool the cost drivers are audio input (the recording) and output
 # (the transcript), so each entry carries an audio rate where Google bills one
 # separately; audio_per_1m=None means audio is billed at the flat input rate.
@@ -38,6 +38,13 @@ MODELS = {
         "input_per_1m": 0.50,
         "audio_per_1m": 1.00,
         "output_per_1m": 3.00,
+    },
+    "gemini-3.6-flash": {
+        "label": "Gemini 3.6 Flash (newest)",
+        "model": "gemini-3.6-flash",
+        "input_per_1m": 1.50,
+        "audio_per_1m": None,
+        "output_per_1m": 7.50,
     },
     "gemini-2.5-flash": {
         "label": "Gemini 2.5 Flash",
@@ -53,8 +60,15 @@ MODELS = {
         "audio_per_1m": 0.50,
         "output_per_1m": 1.50,
     },
+    "gemini-3.5-flash-lite": {
+        "label": "Gemini 3.5 Flash-Lite",
+        "model": "gemini-3.5-flash-lite",
+        "input_per_1m": 0.30,
+        "audio_per_1m": None,
+        "output_per_1m": 2.50,
+    },
     "gemini-3.5-flash": {
-        "label": "Gemini 3.5 Flash (newest, pricier)",
+        "label": "Gemini 3.5 Flash",
         "model": "gemini-3.5-flash",
         "input_per_1m": 1.50,
         "audio_per_1m": 1.50,
