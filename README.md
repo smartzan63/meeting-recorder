@@ -89,10 +89,13 @@ Available models (set via the UI dropdown at runtime, which shows each model's p
 - `gemini-3-flash-preview` — default; best value for diarization quality
 - `gemini-2.5-flash` — cheaper, stable availability
 - `gemini-3.1-flash-lite` — cheapest
-- `gemini-3.5-flash` — newest, roughly 3x the output cost of Gemini 3 Flash
+- `gemini-3.7-flash` — newest
+- `gemini-3.6-flash`, `gemini-3.5-flash` — previous Flash generations
 - `gemini-3.1-pro-preview`, `gemini-2.5-pro` — highest quality, higher cost
 
 The list and its prices are hand-maintained in `config.py` (the Gemini API does not expose pricing).
+
+Gemini 3.6 and 3.7 Flash are on a promotional rate that Google bills through 2026-12-31, after which the list price applies (double the promotional rate). Those entries carry `promo_until` plus their list prices, and `config.py` swaps the list price in automatically once the date passes — no edit needed in January.
 
 ### Azure
 

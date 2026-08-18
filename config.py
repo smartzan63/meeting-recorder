@@ -1,4 +1,6 @@
 import os
+from datetime import date
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -31,6 +33,13 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 # Pro models add a >200k-token tier not modelled here (meetings rarely exceed
 # it). Gemini 3 Flash stays the default: best value for diarization quality.
 # Run the /models/available freshness check to spot newer models Google ships.
+#
+# Some models carry a promotional rate that expires on a known date, after
+# which Google's list price applies. Those entries set "promo_until" (the last
+# day the promotional rate is billed) alongside "list_input_per_1m" and
+# "list_output_per_1m". _apply_promo_expiry() below swaps the list price in
+# once that date has passed, so the rates the app serves stay correct without
+# anyone editing this file in January.
 MODELS = {
     "gemini": {
         "label": "Gemini 3 Flash (recommended)",
@@ -40,18 +49,24 @@ MODELS = {
         "output_per_1m": 3.00,
     },
     "gemini-3.7-flash": {
-        "label": "Gemini 3.7 Flash (newest, intro price through 2026-12-31)",
+        "label": "Gemini 3.7 Flash (newest)",
         "model": "gemini-3.7-flash",
         "input_per_1m": 0.75,
         "audio_per_1m": None,
         "output_per_1m": 3.75,
+        "promo_until": "2026-12-31",
+        "list_input_per_1m": 1.50,
+        "list_output_per_1m": 7.50,
     },
     "gemini-3.6-flash": {
-        "label": "Gemini 3.6 Flash (newest)",
+        "label": "Gemini 3.6 Flash",
         "model": "gemini-3.6-flash",
-        "input_per_1m": 1.50,
+        "input_per_1m": 0.75,
         "audio_per_1m": None,
-        "output_per_1m": 7.50,
+        "output_per_1m": 3.75,
+        "promo_until": "2026-12-31",
+        "list_input_per_1m": 1.50,
+        "list_output_per_1m": 7.50,
     },
     "gemini-2.5-flash": {
         "label": "Gemini 2.5 Flash",
@@ -96,6 +111,29 @@ MODELS = {
         "output_per_1m": 10.00,
     },
 }
+
+
+def _apply_promo_expiry(models, today=None):
+    """Replace promotional rates with list rates once the promo has expired.
+
+    Mutates and returns `models`. A promo is billed through and including
+    "promo_until", so the list price applies from the day after. Entries
+    without "promo_until" are left untouched.
+    """
+    today = today or date.today()
+    for cfg in models.values():
+        promo_until = cfg.get("promo_until")
+        if not promo_until:
+            continue
+        if today <= date.fromisoformat(promo_until):
+            continue
+        cfg["input_per_1m"] = cfg["list_input_per_1m"]
+        cfg["output_per_1m"] = cfg["list_output_per_1m"]
+    return models
+
+
+_apply_promo_expiry(MODELS)
+
 DEFAULT_MODEL = "gemini"
 
 # --- Azure ---
