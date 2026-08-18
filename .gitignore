@@ -2,6 +2,9 @@
 .env
 compose.override.yaml
 
+# Participant roster — real names, never committed. Only the example ships.
+roster.json
+
 # Runtime data — personal recordings and transcripts
 recordings/*
 !recordings/.gitkeep

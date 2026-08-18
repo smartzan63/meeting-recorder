@@ -9,7 +9,8 @@ Open `http://localhost:8080`, click **Start Recording**, talk, click **Stop Reco
 - One-button recording control via OBS WebSocket
 - Cloud transcription + speaker diarization — no local GPU needed
 - Speaker name editor — rename `SPEAKER_00` / `SPEAKER_01` to real names; names are saved automatically and restored on next load
-- AI speaker enrichment — identifies real names from conversation context and pre-fills the name editor; user edits are always preserved through re-enrichment
+- AI speaker enrichment — identifies real names from conversation context and pre-fills the name editor; user edits are always preserved through re-enrichment. Each name carries a confidence: a name the transcript states outright is filled in silently, an inferred one is marked `~`, and a guess is left blank and marked `?` rather than filled with something plausible. Hover any field to see the transcript line the name was taken from
+- Optional participant roster — supply the invite list with the nicknames people are actually called out loud, and enrichment matches speakers against it instead of writing down whatever it heard. Two participants sharing a nickname is detected and left for you to resolve
 - Enrich & Summarise — generates a structured English summary regardless of transcript language; auto-saved to disk; shows a warning when speaker names have changed since the last summary
 - File upload — process any audio/video file (M4A, WAV, MP4, MKV…) without OBS
 - Language selection — auto-detect English/Russian or explicitly select either language for new and reprocessed transcripts
@@ -97,6 +98,30 @@ The list and its prices are hand-maintained in `config.py` (the Gemini API does 
 
 Gemini 3.6 and 3.7 Flash are on a promotional rate that Google bills through 2026-12-31, after which the list price applies (double the promotional rate). Those entries carry `promo_until` plus their list prices, and `config.py` swaps the list price in automatically once the date passes — no edit needed in January.
 
+### Speaker naming and the participant roster
+
+Enrichment names speakers from the transcript alone by default. That works when someone is addressed by name, and degrades badly otherwise: the model writes down the name as it was pronounced, so a mishearing becomes a speaker name, and a meeting with two Alexes can end up with both called "Alex".
+
+An optional roster fixes both. Copy `roster.example.json` to `roster.json` inside your transcripts directory (or point `ROSTER_PATH` anywhere else) and list who was invited:
+
+```json
+{
+  "people": [
+    { "name": "Ada Lovelace", "aliases": ["Ada"] },
+    { "name": "Alan Turing", "aliases": ["Alan", "Al"] },
+    { "name": "Alonzo Church", "aliases": ["Alonzo", "Al"] }
+  ]
+}
+```
+
+`aliases` is where the value is: put every form a person is called out loud, including nicknames and the spellings your transcription tends to produce. Names resolve to the canonical form, so the transcript reads consistently however someone was addressed.
+
+Sharing an alias — "Al" above — is expected. Enrichment detects the collision and refuses to auto-fill either candidate, because picking one would hide a coin flip behind a filled-in field. Same for a speaker matching nobody on the list: the roster is a strong prior, never a closed set, so someone missing from it is left blank rather than forced onto the nearest name.
+
+Everything the model returns is checked server-side before it reaches the UI. A name is auto-filled only at high or medium confidence; low-confidence answers are shown as a placeholder suggestion you can accept or ignore. `GET /roster` reports whether a roster was found and how many people it holds, so a run without one is distinguishable from a run where it silently failed to load.
+
+The roster is data and never ships: `roster.json` is gitignored, and the default location is your transcripts directory, which already lives outside this repository. Only `roster.example.json`, with invented names, is committed. The tool runs normally with no roster at all.
+
 ### Azure
 
 Requires two Azure resources:
@@ -137,6 +162,7 @@ Copy `.env.example` to `.env`. The file is never committed (`.gitignore`).
 | `NOTION_TOKEN` | — | Notion internal integration token (create at [notion.so/my-integrations](https://www.notion.so/my-integrations)) |
 | `NOTION_DATABASE_ID` | — | ID of the Notion database to add pages to — visible in the database URL after the last `/` and before `?v=` |
 | `EXPORT_INCLUDE_TRANSCRIPT` | `false` | Set to `true` to include full transcript in Confluence/Notion exports |
+| `ROSTER_PATH` | `<TRANSCRIPTS_DIR>/roster.json` | Participant roster used as a prior for speaker naming. Optional — enrichment works without it. See [Speaker naming](#speaker-naming-and-the-participant-roster) |
 | `PORT` | `8080` | Web server port |
 
 ### Notion setup

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 import config
+import roster
 
 logger = logging.getLogger(__name__)
 
@@ -174,56 +175,208 @@ def _format_azure_transcript(data: dict) -> str:
     return "\n\n".join(lines)
 
 
+_CONFIDENCE_ORDER = {"high": 3, "medium": 2, "low": 1}
+
 _ENRICH_PROMPT = (
-    "You are analyzing a meeting transcript. Identify the real names of the speakers "
-    "if they can be determined from the conversation context (e.g. someone is addressed "
-    "by name, introduces themselves, or signs off with their name).\n\n"
-    "Return ONLY a JSON object mapping speaker labels to names, e.g.:\n"
-    '{{"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"}}\n\n'
-    "If a speaker's name cannot be determined, omit them from the result.\n"
-    "If no names can be determined at all, return an empty object: {{}}\n\n"
+    "You are analyzing a meeting transcript in which speakers are labelled "
+    "SPEAKER_00, SPEAKER_01 and so on. Work out who each label is.\n\n"
+    "{roster_section}"
+    "For every speaker label, judge how strongly the transcript supports the name:\n"
+    '- "high": the transcript states it directly — the speaker introduces themselves, '
+    "is addressed by name immediately before or after they speak, or is named by "
+    "another speaker in a way that is unambiguous.\n"
+    '- "medium": the name follows from context (role, topic ownership, who someone '
+    "replies to) but is never stated for that speaker.\n"
+    '- "low": a guess. Use this whenever you are unsure, including when two people '
+    "could both fit the same spoken name.\n\n"
+    "Rules:\n"
+    "- Quote the exact transcript line that justifies the name in \"evidence\", "
+    "verbatim, including its timestamp. If you cannot quote a line, the confidence "
+    'is at most "medium", and if you are inventing support it is "low".\n'
+    "- Never repair or re-spell a name you heard. Either it matches a participant "
+    'above, or you return "" and let a human decide.\n'
+    "- Two different labels are two different people. Do not give the same name to "
+    "two labels.\n"
+    '- A label you cannot place gets {{"name": "", "confidence": "low", "evidence": ""}}. '
+    "That is a normal, useful answer — a wrong name costs more than a blank one.\n\n"
+    "Return ONLY a JSON object keyed by speaker label:\n"
+    '{{"SPEAKER_00": {{"name": "Alice Smith", "confidence": "high", "evidence": "[01:29] Alice, go ahead"}}, '
+    '"SPEAKER_01": {{"name": "", "confidence": "low", "evidence": ""}}}}\n\n'
     "Do not include any explanation, only the JSON object.\n\n"
     "Transcript:\n{transcript}"
 )
 
+_ROSTER_SECTION = (
+    "These people were invited to the meeting. Match each speaker to one of them "
+    "and return the canonical name EXACTLY as written here, never a nickname or a "
+    "spelling from the audio:\n\n"
+    "{people}\n\n"
+    "The list is a strong prior, not a closed set. Someone present may be missing "
+    'from it — if a speaker matches nobody, return "" rather than forcing them onto '
+    "the nearest name. Where an alias is marked as shared, two participants answer "
+    "to it, so decide from what the speaker actually talks about and lower your "
+    "confidence when the transcript does not settle it.\n\n"
+)
 
-def _parse_speaker_json(raw: str) -> dict[str, str]:
+
+def _parse_speaker_details(raw: str) -> dict[str, dict]:
+    """Parse the enrichment response into per-speaker detail dicts.
+
+    Accepts both the current shape ({"SPEAKER_00": {"name": ...}}) and the older
+    flat shape ({"SPEAKER_00": "Alice"}), so a model that ignores the schema
+    still produces something usable — normalised to the detail shape with
+    unknown confidence.
+    """
     import json, re
-    raw = raw.strip()
+
+    def normalise(parsed: object) -> dict[str, dict]:
+        if not isinstance(parsed, dict):
+            return {}
+        out: dict[str, dict] = {}
+        for tag, value in parsed.items():
+            if not isinstance(tag, str):
+                continue
+            if isinstance(value, str):
+                name, confidence, evidence = value, "medium", ""
+            elif isinstance(value, dict):
+                name = value.get("name") or ""
+                confidence = value.get("confidence") or "low"
+                evidence = value.get("evidence") or ""
+                if not isinstance(name, str) or not isinstance(evidence, str):
+                    continue
+                confidence = confidence if isinstance(confidence, str) else "low"
+            else:
+                continue
+            confidence = confidence.strip().lower()
+            if confidence not in _CONFIDENCE_ORDER:
+                confidence = "low"
+            out[tag] = {
+                "name": name.strip(),
+                "confidence": confidence,
+                "evidence": evidence.strip(),
+            }
+        return out
+
+    raw = (raw or "").strip()
     # Strip markdown code fences
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
         raw = raw.strip()
-    # Try direct parse first
     try:
-        result = json.loads(raw)
-        if isinstance(result, dict):
-            return {k: v for k, v in result.items() if isinstance(k, str) and isinstance(v, str)}
+        result = normalise(json.loads(raw))
+        if result:
+            return result
     except (json.JSONDecodeError, ValueError):
         pass
-    # Fallback: extract first {...} block from the response
-    match = re.search(r'\{[^{}]+\}', raw, re.DOTALL)
+    # Fallback: extract the first {...} block, now allowing one level of nesting
+    match = re.search(r'\{(?:[^{}]|\{[^{}]*\})*\}', raw, re.DOTALL)
     if match:
         try:
-            result = json.loads(match.group())
-            if isinstance(result, dict):
-                return {k: v for k, v in result.items() if isinstance(k, str) and isinstance(v, str)}
+            return normalise(json.loads(match.group()))
         except (json.JSONDecodeError, ValueError):
             pass
     return {}
 
 
-def enrich_transcript(transcript: str, model_key: str = config.DEFAULT_MODEL) -> dict[str, str]:
-    """Identify real speaker names from transcript context. Returns a mapping like
-    {"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"} or {} if names cannot be determined.
+def _ground_details(details: dict[str, dict], people: "roster.Roster") -> dict[str, dict]:
+    """Reconcile the model's answer against the roster, deterministically.
+
+    The model is not trusted to police its own confidence. Three corrections
+    are applied here instead, in order:
+
+    1. Resolve each name to its canonical roster form. A name the roster does
+       not contain is kept as-is but demoted to "low" and marked off_roster —
+       it is exactly the case a human needs to look at.
+    2. Demote to "low" any name resting on an alias that two participants
+       share, however sure the model claimed to be. Matching "Dima" against a
+       roster holding two Dimas is not a resolution, it is a coin flip, and
+       auto-filling the winner hides the choice from the one person who can
+       actually make it. The canonical guess is kept in the detail so the UI
+       can offer it as a suggestion.
+    3. Enforce one person per label. If two labels resolve to the same person
+       the best-supported one keeps the name and the rest are demoted, because
+       two labels are two people by construction.
+    """
+    grounded: dict[str, dict] = {}
+    for tag, detail in details.items():
+        entry = dict(detail)
+        raw_name = entry.get("name", "")
+        entry["off_roster"] = False
+        entry["ambiguous"] = False
+
+        if raw_name and people:
+            canonical = people.resolve(raw_name)
+            if canonical:
+                entry["name"] = canonical
+                if people.is_ambiguous(raw_name):
+                    entry["ambiguous"] = True
+                    entry["confidence"] = "low"
+            else:
+                entry["off_roster"] = True
+                entry["confidence"] = "low"
+        grounded[tag] = entry
+
+    # One person, one label: keep the strongest claim, demote the rest.
+    by_name: dict[str, list[str]] = {}
+    for tag, entry in grounded.items():
+        if entry.get("name"):
+            by_name.setdefault(entry["name"].casefold(), []).append(tag)
+    for tags in by_name.values():
+        if len(tags) < 2:
+            continue
+        ranked = sorted(
+            tags,
+            key=lambda t: (_CONFIDENCE_ORDER[grounded[t]["confidence"]], bool(grounded[t]["evidence"])),
+            reverse=True,
+        )
+        for tag in ranked[1:]:
+            grounded[tag]["confidence"] = "low"
+            grounded[tag]["contested"] = True
+
+    return grounded
+
+
+def confident_names(details: dict[str, dict]) -> dict[str, str]:
+    """The subset safe to auto-fill into the speaker editor.
+
+    Low confidence deliberately yields nothing. A blank field asks the user a
+    question; a wrongly filled one answers it for them, and they only find out
+    by re-reading the transcript.
+    """
+    return {
+        tag: entry["name"]
+        for tag, entry in details.items()
+        if entry.get("name") and entry.get("confidence") in ("high", "medium")
+    }
+
+
+def _enrich_prompt(transcript: str, people: "roster.Roster") -> str:
+    roster_section = _ROSTER_SECTION.format(people=people.prompt_block()) if people else ""
+    return _ENRICH_PROMPT.format(transcript=transcript, roster_section=roster_section)
+
+
+def enrich_transcript(transcript: str, model_key: str = config.DEFAULT_MODEL) -> dict[str, dict]:
+    """Identify real speaker names from transcript context.
+
+    Returns a per-label detail map:
+        {"SPEAKER_00": {"name": "Alice Smith", "confidence": "high",
+                        "evidence": "[01:29] Alice, go ahead",
+                        "off_roster": False, "ambiguous": False}}
+
+    Callers that want the plain tag -> name mapping pass the result through
+    confident_names(), which drops everything the transcript does not actually
+    support. Names are grounded against the optional roster (roster.py) before
+    being returned.
 
     Uses Azure OpenAI when Azure is the primary provider, Gemini otherwise.
     Never raises — returns {} on any error.
     """
     if config.PRIMARY_PROVIDER == "mock":
         return {}
+
+    people = roster.load_roster()
 
     try:
         if config.PRIMARY_PROVIDER == "azure":
@@ -238,13 +391,13 @@ def enrich_transcript(transcript: str, model_key: str = config.DEFAULT_MODEL) ->
                 api_key=config.AZURE_OPENAI_KEY,
                 api_version="2025-01-01-preview",
             )
-            prompt = _ENRICH_PROMPT.format(transcript=transcript)
+            prompt = _enrich_prompt(transcript, people)
             response = client.chat.completions.create(
                 model=config.AZURE_OPENAI_DEPLOYMENT,
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = (response.choices[0].message.content or "").strip()
-            return _parse_speaker_json(raw)
+            return _ground_details(_parse_speaker_details(raw), people)
 
         else:
             # Gemini provider
@@ -256,7 +409,7 @@ def enrich_transcript(transcript: str, model_key: str = config.DEFAULT_MODEL) ->
 
             model_id = config.MODELS.get(model_key, config.MODELS[config.DEFAULT_MODEL])["model"]
             client = genai.Client(api_key=config.GEMINI_API_KEY)
-            prompt = _ENRICH_PROMPT.format(transcript=transcript)
+            prompt = _enrich_prompt(transcript, people)
             # Do NOT use response_mime_type="application/json" — it causes the SDK
             # to misbehave and raise exceptions on valid responses.
             response = client.models.generate_content(
@@ -265,8 +418,15 @@ def enrich_transcript(transcript: str, model_key: str = config.DEFAULT_MODEL) ->
             )
             raw = response.text
             logger.info("enrich_transcript raw response: %r", raw)
-            result = _parse_speaker_json(raw)
-            logger.info("enrich_transcript parsed result: %r", result)
+            result = _ground_details(_parse_speaker_details(raw), people)
+            # Log the grounded verdict per label, not a count: a future bad run is
+            # diagnosed from which label got demoted and why.
+            for tag, entry in sorted(result.items()):
+                logger.info(
+                    "enrich_transcript %s -> name=%r confidence=%s off_roster=%s ambiguous=%s contested=%s evidence=%r",
+                    tag, entry.get("name"), entry.get("confidence"), entry.get("off_roster"),
+                    entry.get("ambiguous"), entry.get("contested", False), entry.get("evidence"),
+                )
             return result
 
     except Exception as e:

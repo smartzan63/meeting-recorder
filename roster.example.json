@@ -1,0 +1,24 @@
+{
+  "_comment": [
+    "Copy this file to the location ROSTER_PATH points at, or to roster.json inside",
+    "your transcripts directory (the default). Real rosters are never committed —",
+    "roster.json is gitignored, and the default location is outside this repo.",
+    "",
+    "List everyone on the calendar invite, not only whoever was visibly present:",
+    "a speaker who is missing from the roster gets named 'unknown' rather than",
+    "matched onto the nearest person.",
+    "",
+    "'aliases' is where the value is. Put every form a person is called out loud —",
+    "nicknames, diminutives, and the spellings your transcription tends to produce.",
+    "Two people sharing an alias is expected and handled: enrichment caps its",
+    "confidence on any name that rests on a shared form."
+  ],
+  "people": [
+    { "name": "Ada Lovelace", "aliases": ["Ada"] },
+    { "name": "Alan Turing", "aliases": ["Alan", "Al"] },
+    { "name": "Alonzo Church", "aliases": ["Alonzo", "Al"] },
+    { "name": "Grace Hopper", "aliases": ["Grace", "Amazing Grace"] },
+    { "name": "Katherine Johnson", "aliases": ["Katherine", "Kathy"] },
+    { "name": "Edsger Dijkstra" }
+  ]
+}

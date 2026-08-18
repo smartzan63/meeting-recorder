@@ -18,7 +18,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py pipeline.py obs.py config.py storage.py ./
+COPY app.py pipeline.py obs.py config.py storage.py roster.py ./
 COPY static/ ./static/
 
 # Copy built frontend

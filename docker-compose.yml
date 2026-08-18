@@ -25,6 +25,7 @@ services:
       - ./app.py:/app/app.py:ro
       - ./pipeline.py:/app/pipeline.py:ro
       - ./config.py:/app/config.py:ro
+      - ./roster.py:/app/roster.py:ro
     dns:
       - 8.8.8.8
       - 8.8.4.4

@@ -44,6 +44,7 @@ def _available_providers() -> list[str]:
     return providers
 import obs
 import pipeline
+import roster
 import storage
 
 logging.basicConfig(level=logging.INFO, force=True)
@@ -170,6 +171,23 @@ async def integrations():
         "confluence": bool(config.CONFLUENCE_URL and config.CONFLUENCE_EMAIL and config.CONFLUENCE_TOKEN),
         "notion": bool(config.NOTION_TOKEN and config.NOTION_DATABASE_ID),
         "test_file_path": config.TEST_FILE_PATH or None,
+    }
+
+
+@app.get("/roster")
+async def roster_status():
+    """Whether a participant roster was picked up, and from where.
+
+    Returns the count and path, never the names — this is a status check, so
+    that a run with no roster is visibly different from a run with one. Without
+    it, "the roster did nothing" and "the roster was never found" look
+    identical in the UI.
+    """
+    people = roster.load_roster()
+    return {
+        "loaded": bool(people),
+        "count": len(people.people),
+        "path": str(roster.roster_path()),
     }
 
 
@@ -317,17 +335,20 @@ async def upload_file(
 async def enrich(body: dict):
     text = (body.get("text") or "").strip()
     if not text:
-        return {"speakers": {}}
+        return {"speakers": {}, "speaker_details": {}}
     loop = asyncio.get_running_loop()
     try:
         model_key = (body.get("model") or config.DEFAULT_MODEL).strip()
         if not _valid_model_key(model_key):
             model_key = _default_model_key()
-        speakers = await loop.run_in_executor(None, lambda: pipeline.enrich_transcript(text, model_key))
-        return {"speakers": speakers}
+        details = await loop.run_in_executor(None, lambda: pipeline.enrich_transcript(text, model_key))
+        # "speakers" stays the flat tag -> name map every existing caller expects,
+        # and now carries only the names the transcript actually supports.
+        # "speaker_details" is additive: confidence and the quoted evidence line.
+        return {"speakers": pipeline.confident_names(details), "speaker_details": details}
     except Exception as e:
         logger.warning("Enrichment failed (non-fatal): %s", e)
-        return {"speakers": {}}
+        return {"speakers": {}, "speaker_details": {}}
 
 
 @app.post("/summarize")

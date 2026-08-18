@@ -23,6 +23,28 @@ type HistoryItem = {
   has_summary?: boolean
 }
 
+import type { SpeakerDetail } from '@/App'
+
+// How a speaker name is presented depends on how well the transcript supports
+// it. A confident name reads as a plain name; anything weaker has to say so,
+// because an unmarked guess is indistinguishable from a fact.
+const CONFIDENCE_HINT: Record<string, { mark: string; tone: string; label: string }> = {
+  high: { mark: '', tone: '', label: 'Stated in the transcript' },
+  medium: { mark: '~', tone: 'text-amber-400', label: 'Inferred from context, not stated' },
+  low: { mark: '?', tone: 'text-rose-400', label: 'Not determined — left blank on purpose' },
+}
+
+function speakerHint(detail?: SpeakerDetail): string {
+  if (!detail) return ''
+  const parts: string[] = [CONFIDENCE_HINT[detail.confidence]?.label ?? detail.confidence]
+  if (detail.ambiguous) parts.push('two participants answer to this name')
+  if (detail.off_roster) parts.push('no participant matches this name')
+  if (detail.contested) parts.push('another speaker matched the same person more strongly')
+  if (detail.name) parts.push(`suggested: ${detail.name}`)
+  if (detail.evidence) parts.push(`evidence: ${detail.evidence}`)
+  return parts.join(' — ')
+}
+
 type TranscriptPanelProps = {
   transcript: string
   originalTranscript: string
@@ -31,6 +53,7 @@ type TranscriptPanelProps = {
   summaryMarkdown: string
   onEnrichAndSummarize: () => Promise<void>
   enrichedSpeakers?: Record<string, string>
+  speakerDetails?: Record<string, SpeakerDetail>
   speakersList?: string[]
   currentRecordingName: string | null
   onSpeakersPersist?: (speakers: Record<string, string>) => void
@@ -75,6 +98,7 @@ export function TranscriptPanel({
   summaryMarkdown,
   onEnrichAndSummarize,
   enrichedSpeakers,
+  speakerDetails,
   speakersList,
   currentRecordingName,
   onSpeakersPersist,
@@ -277,6 +301,13 @@ export function TranscriptPanel({
               <div className="flex flex-col gap-1.5">
                 {speakers.map((tag, i) => {
                   const colors = SPEAKER_COLORS[i % SPEAKER_COLORS.length]
+                  const detail = speakerDetails?.[tag]
+                  // Only mark a field the user has not answered themselves. Once
+                  // they type a name it is theirs, and the model's doubt about
+                  // its own guess says nothing about their answer.
+                  const untouched = !speakerNames[tag]?.trim()
+                  const hint = detail && untouched ? CONFIDENCE_HINT[detail.confidence] : undefined
+                  const suggestion = detail?.name && untouched && detail.confidence === 'low' ? detail.name : ''
                   return (
                     <div key={tag} className="flex items-center gap-2">
                       <Badge
@@ -287,9 +318,19 @@ export function TranscriptPanel({
                       <Input
                         value={speakerNames[tag] ?? ''}
                         onChange={(e) => handleSpeakerChange(tag, e.target.value)}
-                        placeholder={`Name for ${tag}`}
+                        placeholder={suggestion ? `${suggestion}?` : `Name for ${tag}`}
+                        title={speakerHint(detail)}
                         className={`h-7 text-xs bg-zinc-900 border-zinc-700 text-zinc-200 placeholder:text-zinc-600 ${colors.input}`}
                       />
+                      {hint?.mark && (
+                        <span
+                          className={`shrink-0 w-3 text-center text-xs font-bold ${hint.tone}`}
+                          title={speakerHint(detail)}
+                        >
+                          {hint.mark}
+                        </span>
+                      )}
+                      {!hint?.mark && <span className="shrink-0 w-3" />}
                     </div>
                   )
                 })}

@@ -16,6 +16,18 @@ type Integrations = {
   test_file_path?: string | null
 }
 
+// Enrichment result for one speaker label. The name alone cannot say how well
+// the transcript supports it, so the backend returns the confidence and the
+// line it quoted; the UI shows both rather than silently filling a guess in.
+export type SpeakerDetail = {
+  name: string
+  confidence: 'high' | 'medium' | 'low'
+  evidence: string
+  off_roster?: boolean
+  ambiguous?: boolean
+  contested?: boolean
+}
+
 type AppState = {
   status: AppStatus
   statusMessage: string
@@ -34,6 +46,7 @@ type AppState = {
   translateEnabled: boolean
   history: Array<{ id: string; source: string; model: string; created_at: string; has_summary?: boolean }>
   enrichedSpeakers: Record<string, string>
+  speakerDetails: Record<string, SpeakerDetail>
   speakersList: string[]
   isExporting: boolean
   lastExportUrl: string | null
@@ -76,7 +89,7 @@ type Action =
   | { type: 'SET_LANGUAGE'; language: string }
   | { type: 'SET_TRANSLATE'; value: boolean }
   | { type: 'SET_HISTORY'; items: AppState['history'] }
-  | { type: 'SET_ENRICHED_SPEAKERS'; speakers: Record<string, string> }
+  | { type: 'SET_ENRICHED_SPEAKERS'; speakers: Record<string, string>; details?: Record<string, SpeakerDetail> }
   | { type: 'SET_SPEAKERS_LIST'; list: string[] }
   | { type: 'SET_EXPORTING'; value: boolean }
   | { type: 'SET_EXPORT_RESULT'; url: string | null }
@@ -105,6 +118,7 @@ const initialState: AppState = {
   translateEnabled: false,
   history: [],
   enrichedSpeakers: {},
+  speakerDetails: {},
   speakersList: [],
   isExporting: false,
   lastExportUrl: null,
@@ -168,6 +182,7 @@ function reducer(state: AppState, action: Action): AppState {
         currentRecordingName: null,
         summaryMarkdown: '',
         enrichedSpeakers: {},
+        speakerDetails: {},
         speakersList: [],
       }
     case 'UPDATE_TRANSCRIPT':
@@ -205,7 +220,7 @@ function reducer(state: AppState, action: Action): AppState {
     case 'SET_HISTORY':
       return { ...state, history: action.items }
     case 'SET_ENRICHED_SPEAKERS':
-      return { ...state, enrichedSpeakers: action.speakers }
+      return { ...state, enrichedSpeakers: action.speakers, speakerDetails: action.details ?? {} }
     case 'SET_SPEAKERS_LIST':
       return { ...state, speakersList: action.list }
     case 'SET_EXPORTING':
@@ -481,9 +496,13 @@ export default function App() {
 
       // Step 1: enrich — never throws, gracefully returns {} on failure
       try {
-        const enrichRes = await apiPost<{ speakers: Record<string, string> }>('/enrich', { text: state.originalTranscript || state.transcript, model: state.selectedModel })
+        const enrichRes = await apiPost<{ speakers: Record<string, string>; speaker_details?: Record<string, SpeakerDetail> }>('/enrich', { text: state.originalTranscript || state.transcript, model: state.selectedModel })
+        // Details can arrive for labels that produced no confident name — those
+        // still need to reach the UI so it can show why the field stayed blank.
+        if (enrichRes.speaker_details && Object.keys(enrichRes.speaker_details).length > 0) {
+          dispatch({ type: 'SET_ENRICHED_SPEAKERS', speakers: enrichRes.speakers ?? {}, details: enrichRes.speaker_details })
+        }
         if (enrichRes.speakers && Object.keys(enrichRes.speakers).length > 0) {
-          dispatch({ type: 'SET_ENRICHED_SPEAKERS', speakers: enrichRes.speakers })
 
           // Apply enrichment on top of the user-edited transcript so user edits win.
           // Any SPEAKER_XX already replaced by the user won't be in state.transcript,
@@ -787,6 +806,7 @@ export default function App() {
             summaryMarkdown={state.summaryMarkdown}
             onEnrichAndSummarize={handleEnrichAndSummarize}
             enrichedSpeakers={state.enrichedSpeakers}
+            speakerDetails={state.speakerDetails}
             speakersList={state.speakersList}
             currentRecordingName={state.currentRecordingName}
             onSpeakersPersist={handleSpeakersPersist}
