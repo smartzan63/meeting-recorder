@@ -674,6 +674,35 @@ async def websocket_endpoint(ws: WebSocket):
 
 # ── Background pipeline task ──────────────────────────────────────────────────
 
+def _user_facing_error(e: Exception) -> str:
+    """Plain-language text for the UI. Falls back progressively, never to empty."""
+    explained = getattr(e, "user_message", None)
+    if explained:
+        return explained
+
+    # google-genai raises APIError subclasses carrying an HTTP status code.
+    code = getattr(e, "code", None) or getattr(e, "status_code", None)
+    raw = str(e) or e.__class__.__name__
+    if code in (401, 403):
+        return f"The provider rejected the API key ({code}). Check GEMINI_API_KEY in .env."
+    if code == 429:
+        return "The provider is rate-limiting or the quota is exhausted (429). Wait and retry, or use another provider."
+    if code == 404:
+        return f"The provider does not recognise the requested model (404). Details: {raw}"
+    if isinstance(code, int) and code >= 500:
+        return f"The provider had a server error ({code}). This is on their side — retry shortly."
+    if isinstance(e, (TimeoutError, asyncio.TimeoutError)):
+        return "The provider did not respond in time. Retry, or try a shorter recording."
+    if raw.startswith("ffmpeg failed"):
+        return f"Audio conversion failed before transcription started. {raw}"
+    # FileNotFoundError is an OSError, so it must be tested before the network branch.
+    if isinstance(e, FileNotFoundError):
+        return f"A required file is missing: {raw}"
+    if isinstance(e, (ConnectionError, OSError)):
+        return f"Could not reach the provider — check the network or DNS. Details: {raw}"
+    return f"{e.__class__.__name__}: {raw}"
+
+
 async def _run_pipeline(audio_path: str, recording_name: str, model_key: str = config.DEFAULT_MODEL, task: str = "transcribe", save_wav: bool = False, language: str = "auto", provider: str | None = None) -> None:
     logger.info("Pipeline started: source=%s model=%s task=%s language=%s", audio_path, model_key, task, language)
 
@@ -762,7 +791,7 @@ async def _run_pipeline(audio_path: str, recording_name: str, model_key: str = c
         logger.exception("Pipeline failed for recording %s", recording_name)
         status_queue.put_nowait(None)
         await drain_task
-        await _send_status("error", f"Pipeline error: {e}")
+        await _send_status("error", f"Transcription failed: {_user_facing_error(e)}")
 
 
 # ── Static file serving ───────────────────────────────────────────────────────

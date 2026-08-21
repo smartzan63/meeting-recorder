@@ -18,6 +18,8 @@ import roster
 
 logger = logging.getLogger(__name__)
 
+_GEMINI_EMPTY_RETRIES = 3
+
 _MIME_MAP = {
     ".m4a": "audio/mp4",
     ".wav": "audio/wav",
@@ -28,6 +30,118 @@ _MIME_MAP = {
     ".flac": "audio/flac",
     ".webm": "audio/webm",
 }
+
+
+class GeminiEmptyResponse(RuntimeError):
+    """Gemini returned a 200 with no usable text (usually a safety block).
+
+    `user_message` is what the UI shows: plain language, and what to do next.
+    str(exc) keeps the raw reason codes for the log.
+    """
+
+    def __init__(self, message: str, user_message: str, block_reason=None, retryable: bool = True):
+        super().__init__(message)
+        self.user_message = user_message
+        self.block_reason = block_reason
+        self.retryable = retryable
+
+
+# Every BlockedReason and FinishReason the installed SDK defines, mapped to what
+# a person should do about it. `retryable` also gates the retry loop: re-running a
+# recording that trips a deterministic filter just bills the same block again.
+# Unlisted reasons (future enum values) fall through to a default that names the
+# reason verbatim rather than guessing at its meaning.
+_FILTER_ADVICE = (
+    "Something in the audio tripped a content filter. This is intermittent, so a "
+    "retry often clears it; switching model or provider is the reliable fix."
+)
+_EMPTY_RESPONSE_REASONS = {
+    # content filters — intermittent, worth retrying
+    "SAFETY": (_FILTER_ADVICE, True),
+    "PROHIBITED_CONTENT": (_FILTER_ADVICE, True),
+    "IMAGE_SAFETY": (_FILTER_ADVICE, True),
+    "IMAGE_PROHIBITED_CONTENT": (_FILTER_ADVICE, True),
+    "MODEL_ARMOR": (_FILTER_ADVICE, True),
+    "JAILBREAK": (
+        "The request was flagged as a jailbreak attempt. Retrying may clear it; if "
+        "not, the prompt itself needs changing.", True),
+    # deterministic filters — a retry bills the same block again
+    "BLOCKLIST": (
+        "The transcript matched a blocked-terms list. Retrying will hit the same "
+        "block; use a different model or provider for this recording.", False),
+    "SPII": (
+        "The response was withheld for containing sensitive personal information. "
+        "Retrying will not clear this; use a different provider for this recording.", False),
+    "RECITATION": (
+        "The output was withheld for reproducing copyrighted material too closely. "
+        "Retrying rarely helps; try a different model.", False),
+    "IMAGE_RECITATION": (
+        "The output was withheld for reproducing copyrighted material. Try a "
+        "different model.", False),
+    "LANGUAGE": (
+        "The model does not support the language it heard. Set the language "
+        "explicitly instead of Auto-detect, or use Azure AI Speech.", False),
+    "MAX_TOKENS": (
+        "The model hit its output limit before returning anything. Try a shorter "
+        "recording or a different model.", False),
+    # model misbehaviour — retrying is the right move
+    "MALFORMED_FUNCTION_CALL": (
+        "The model returned a malformed tool call instead of text. Retrying "
+        "usually works.", True),
+    "UNEXPECTED_TOOL_CALL": (
+        "The model tried to call a tool instead of answering. Retrying usually "
+        "works.", True),
+    "TOO_MANY_TOOL_CALLS": (
+        "The model exhausted its tool-call budget without answering. Retrying "
+        "usually works.", True),
+    # no stated cause
+    "STOP": (
+        "The model finished normally but produced no text at all — usually a "
+        "transient glitch. Retrying usually works.", True),
+    "OTHER": ("The API gave no specific reason. Retrying may work.", True),
+    "UNSPECIFIED": ("The API gave no reason at all. Retrying may work.", True),
+    "BLOCKED_REASON_UNSPECIFIED": ("The API gave no reason at all. Retrying may work.", True),
+    "FINISH_REASON_UNSPECIFIED": ("The API gave no reason at all. Retrying may work.", True),
+    "NO_IMAGE": ("The model was expected to return an image and did not.", False),
+    "IMAGE_OTHER": ("Image generation failed for an unstated reason.", True),
+}
+
+
+def _gemini_text(response, what: str) -> str:
+    """Return response.text, or raise naming why it is missing.
+
+    A safety-blocked call still returns HTTP 200 with candidates=None and a
+    prompt_feedback.block_reason, so `.text` is None. Writing that straight to a
+    file failed with "write() argument must be str, not None" and hid the cause.
+    """
+    text = response.text
+    if text:
+        return text
+    feedback = getattr(response, "prompt_feedback", None)
+    block_reason = getattr(feedback, "block_reason", None)
+    finish_reason = None
+    candidates = getattr(response, "candidates", None)
+    if candidates:
+        finish_reason = getattr(candidates[0], "finish_reason", None)
+    reason = str(getattr(block_reason, "name", None) or block_reason
+                 or getattr(finish_reason, "name", None) or finish_reason or "")
+    reason = reason.rsplit(".", 1)[-1].upper() or "UNSPECIFIED"
+    advice, retryable = _EMPTY_RESPONSE_REASONS.get(reason, (None, True))
+    if advice is None:
+        # An unrecognised reason must name itself rather than borrow another
+        # reason's explanation — new enum values ship without warning.
+        advice = (
+            f"The API reported the reason as {reason}, which this app does not "
+            "recognise. Retrying may work; if it repeats, try another model or provider."
+        )
+    raise GeminiEmptyResponse(
+        f"Gemini returned no text for {what} "
+        f"(block_reason={block_reason}, finish_reason={finish_reason}, "
+        f"response_id={getattr(response, 'response_id', None)})",
+        f"{what.capitalize()} came back empty. {advice}",
+        block_reason,
+        retryable,
+    )
 
 
 def _convert_to_wav(input_path: str, output_path: str) -> None:
@@ -79,10 +193,8 @@ def _transcribe_with_gemini(
         "en-US": "The meeting is primarily in English. Preserve any clearly spoken non-English passages rather than translating them.",
         "ru-RU": "The meeting is primarily in Russian. Preserve any clearly spoken non-Russian passages rather than translating them.",
     }[language]
-    response = client.models.generate_content(
-        model=model,
-        contents=[
-            """Transcribe this audio. Identify different speakers and label them SPEAKER_00, SPEAKER_01, etc.
+    contents = [
+        """Transcribe this audio. Identify different speakers and label them SPEAKER_00, SPEAKER_01, etc.
 Format the output exactly like this — each speaker turn on its own block:
 
 [MM:SS] SPEAKER_00
@@ -93,17 +205,33 @@ text here
 
 Use timestamps (MM:SS) relative to the start of the audio. Keep the original language of each speaker.
 {language_instruction}""".format(language_instruction=language_instruction),
-            audio_file,
-        ],
-    )
-    logger.info("Gemini: transcription done in %.1fs", time.time() - t0)
+        audio_file,
+    ]
 
+    # A safety block is not deterministic: the same audio can transcribe on one
+    # call and come back blocked on the next, so retry before giving up.
     try:
-        client.files.delete(name=audio_file.name)
-    except Exception:
-        pass
-
-    return response.text
+        for attempt in range(1, _GEMINI_EMPTY_RETRIES + 1):
+            response = client.models.generate_content(model=model, contents=contents)
+            try:
+                transcript = _gemini_text(response, "transcription")
+            except GeminiEmptyResponse as exc:
+                logger.warning("Gemini transcription attempt %d/%d: %s", attempt, _GEMINI_EMPTY_RETRIES, exc)
+                if not exc.retryable:
+                    # Retrying a deterministic block bills the same failure again.
+                    raise
+                if attempt == _GEMINI_EMPTY_RETRIES:
+                    exc.user_message = f"{exc.user_message} (failed on all {_GEMINI_EMPTY_RETRIES} attempts)"
+                    raise
+                status_callback(f"{label} returned no text (attempt {attempt}); retrying...")
+                continue
+            logger.info("Gemini: transcription done in %.1fs", time.time() - t0)
+            return transcript
+    finally:
+        try:
+            client.files.delete(name=audio_file.name)
+        except Exception:
+            pass
 
 
 def _transcribe_with_azure(
@@ -416,7 +544,7 @@ def enrich_transcript(transcript: str, model_key: str = config.DEFAULT_MODEL) ->
                 model=model_id,
                 contents=[prompt],
             )
-            raw = response.text
+            raw = _gemini_text(response, "speaker enrichment")
             logger.info("enrich_transcript raw response: %r", raw)
             result = _ground_details(_parse_speaker_details(raw), people)
             # Log the grounded verdict per label, not a count: a future bad run is
@@ -465,7 +593,7 @@ def _summarize_with_gemini(transcript: str, model_key: str = config.DEFAULT_MODE
         model=model_id,
         contents=[_summary_prompt(transcript)],
     )
-    return response.text
+    return _gemini_text(response, "summary")
 
 
 def _summarize_with_azure(transcript: str) -> str:
