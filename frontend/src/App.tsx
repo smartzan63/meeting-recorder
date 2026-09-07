@@ -32,6 +32,10 @@ type AppState = {
   status: AppStatus
   statusMessage: string
   timerSeconds: number
+  // Wall-clock epoch seconds when the current recording started. The timer is
+  // derived from this rather than counted up, because browsers throttle
+  // setInterval in a backgrounded tab and a counted timer falls behind.
+  recordingStartedAt: number | null
   transcript: string
   originalTranscript: string
   transcriptModel: string
@@ -75,7 +79,7 @@ type Action =
   | { type: 'SET_STATUS_MESSAGE'; message: string }
   | { type: 'TIMER_TICK' }
   | { type: 'TIMER_RESET' }
-  | { type: 'TIMER_INIT'; seconds: number }
+  | { type: 'TIMER_INIT'; startedAt: number }
   | { type: 'SET_TRANSCRIPT'; text: string; model: string }
   | { type: 'UPDATE_TRANSCRIPT'; text: string }
   | { type: 'OPEN_SAVE_DIALOG'; defaultName: string }
@@ -104,6 +108,7 @@ const initialState: AppState = {
   status: 'idle',
   statusMessage: '',
   timerSeconds: 0,
+  recordingStartedAt: null,
   transcript: '',
   originalTranscript: '',
   transcriptModel: '',
@@ -141,16 +146,22 @@ function reducer(state: AppState, action: Action): AppState {
         return {
           ...base,
           timerSeconds: 0,
+          recordingStartedAt: null,
           showSaveDialog: false,
           showProcessPrompt: false,
           statusMessage: '',
         }
       }
       if (action.status === 'recording') {
-        return { ...base, timerSeconds: 0, statusMessage: 'Recording…' }
+        return {
+          ...base,
+          timerSeconds: 0,
+          recordingStartedAt: Math.floor(Date.now() / 1000),
+          statusMessage: 'Recording…',
+        }
       }
       if (action.status === 'stopped') {
-        return { ...base, timerSeconds: 0, statusMessage: '' }
+        return { ...base, timerSeconds: 0, recordingStartedAt: null, statusMessage: '' }
       }
       if (action.status === 'done') {
         return { ...base, statusMessage: action.message ?? 'Transcript ready.' }
@@ -162,12 +173,20 @@ function reducer(state: AppState, action: Action): AppState {
     }
     case 'SET_STATUS_MESSAGE':
       return { ...state, statusMessage: action.message }
-    case 'TIMER_TICK':
-      return { ...state, timerSeconds: state.timerSeconds + 1 }
+    case 'TIMER_TICK': {
+      if (state.recordingStartedAt === null) return state
+      const seconds = Math.max(0, Math.floor(Date.now() / 1000 - state.recordingStartedAt))
+      if (seconds === state.timerSeconds) return state
+      return { ...state, timerSeconds: seconds }
+    }
     case 'TIMER_RESET':
-      return { ...state, timerSeconds: 0 }
+      return { ...state, timerSeconds: 0, recordingStartedAt: null }
     case 'TIMER_INIT':
-      return { ...state, timerSeconds: action.seconds }
+      return {
+        ...state,
+        recordingStartedAt: action.startedAt,
+        timerSeconds: Math.max(0, Math.floor(Date.now() / 1000 - action.startedAt)),
+      }
     case 'SET_TRANSCRIPT':
       return {
         ...state,
@@ -348,8 +367,7 @@ export default function App() {
       if (serverState === 'recording' && (state.status === 'idle' || state.status === 'done')) {
         dispatch({ type: 'SET_STATUS', status: 'recording' })
         if (lastMessage.started_at) {
-          const elapsed = Math.floor(Date.now() / 1000 - lastMessage.started_at)
-          dispatch({ type: 'TIMER_INIT', seconds: Math.max(0, elapsed) })
+          dispatch({ type: 'TIMER_INIT', startedAt: lastMessage.started_at })
         }
       } else if (serverState === 'stopped' && state.status !== 'stopped' && state.status !== 'idle') {
         // Edge case: reconnected while user was naming — go back to idle
