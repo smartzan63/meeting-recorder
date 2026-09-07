@@ -755,8 +755,10 @@ async def _run_pipeline(audio_path: str, recording_name: str, model_key: str = c
         await drain_task
 
         language_label = {"auto": "Auto", "en-US": "English", "ru-RU": "Russian"}[language]
-        provider_label = "Azure AI Speech" if provider == "azure" else "Google Gemini" if provider == "gemini" else _model_label(model_key)
-        model_label = f"{fallback_used or provider_label} ({language_label})"
+        # Name the model, not the provider: two versions of the same recording
+        # are usually two different Gemini models, and "Google Gemini" on both
+        # makes them impossible to tell apart in the version list.
+        model_label = f"{fallback_used or _model_label(model_key)} ({language_label})"
 
         # Pipeline writes a flat transcript file alongside its old contract; remove it
         # before recording the version, otherwise migrate_legacy would turn it into a

@@ -87,10 +87,10 @@ Transcription, diarization, speaker name enrichment, and summarization all use G
 In Auto mode, Gemini is instructed to preserve language switches within a meeting. Azure Fast Transcription identifies one primary language per recording, so use the manual language selector for a Russian-first or English-first Azure recording.
 
 Available models (set via the UI dropdown at runtime, which shows each model's per-1M-token audio-input and output price — all operations use the selected model):
-- `gemini-3-flash-preview` — default; best value for diarization quality
+- `gemini-3.8-flash` — default and newest; best speaker separation and domain terms in a side-by-side run
+- `gemini-3-flash-preview` — previous default, cleaner prose but merges speakers more often
 - `gemini-2.5-flash` — cheaper, stable availability
 - `gemini-3.1-flash-lite` — cheapest
-- `gemini-3.8-flash` — newest
 - `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash` — previous Flash generations
 - `gemini-3.1-pro-preview`, `gemini-2.5-pro` — highest quality, higher cost
 

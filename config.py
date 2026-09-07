@@ -31,7 +31,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 # (the transcript), so each entry carries an audio rate where Google bills one
 # separately; audio_per_1m=None means audio is billed at the flat input rate.
 # Pro models add a >200k-token tier not modelled here (meetings rarely exceed
-# it). Gemini 3 Flash stays the default: best value for diarization quality.
+# it). Gemini 3.8 Flash is the default: on a side-by-side run of the same
+# meeting it separated speakers Gemini 3 Flash merged and got the domain terms
+# right, at a lower price until the promotional rate lapses.
 # Run the /models/available freshness check to spot newer models Google ships.
 #
 # Some models carry a promotional rate that expires on a known date, after
@@ -42,14 +44,14 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 # anyone editing this file in January.
 MODELS = {
     "gemini": {
-        "label": "Gemini 3 Flash (recommended)",
+        "label": "Gemini 3 Flash",
         "model": "gemini-3-flash-preview",
         "input_per_1m": 0.50,
         "audio_per_1m": 1.00,
         "output_per_1m": 3.00,
     },
     "gemini-3.8-flash": {
-        "label": "Gemini 3.8 Flash (newest)",
+        "label": "Gemini 3.8 Flash (recommended, newest)",
         "model": "gemini-3.8-flash",
         "input_per_1m": 0.75,
         "audio_per_1m": None,
@@ -144,7 +146,7 @@ def _apply_promo_expiry(models, today=None):
 
 _apply_promo_expiry(MODELS)
 
-DEFAULT_MODEL = "gemini"
+DEFAULT_MODEL = "gemini-3.8-flash"
 
 # --- Azure ---
 AZURE_SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY", "")
